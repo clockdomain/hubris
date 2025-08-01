@@ -4,9 +4,10 @@
 
 #![no_std]
 
+pub use embedded_hal::serial::{Read, Write};
 use ast1060_pac as device;
-// pub use embedded_hal::serial::{Read, Write};S
-pub use embedded_io::{Read, Write};
+use unwrap_lite::UnwrapLite;
+pub use embedded_io::{Read as IoRead, Write as IoWrite};
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum Error {
@@ -57,12 +58,10 @@ impl<'a> From<&'a device::uart::RegisterBlock> for Usart<'a> {
             });
         }
 
-        // Self { usart }.set_rate(Rate::MBaud1_5).set_8n1().interrupt_enable()
         Self { usart }
             .set_rate(Rate::MBaud1_5)
             .set_8n1()
             .interrupt_enable()
-        // Self { usart }.interrupt_enable()
     }
 }
 
@@ -76,7 +75,8 @@ impl embedded_io::Error for Error {
     }
 }
 
-impl Write for Usart<'_> {
+// embedded-io implementation for modern async interfaces
+impl IoWrite for Usart<'_> {
     fn flush(&mut self) -> Result<(), Error> {
         while !self.is_tx_idle() {}
         Ok(())
@@ -85,25 +85,23 @@ impl Write for Usart<'_> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
         let mut counter = 0;
         for byte in buf {
-            if self.is_tx_full() {
-                // This is unsafe because we can transmit 7, 8 or 9 bits but the
-                // interface can't know what it's been configured for.
+            if !self.is_tx_full() {
                 self.usart
                     .uartthr()
                     .write(|w| unsafe { w.bits(*byte as u32) });
                 counter += 1;
             } else {
-                self.flush()?;
+                break;
             }
         }
         Ok(counter)
     }
 }
 
-impl Read for Usart<'_> {
+impl IoRead for Usart<'_> {
     fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
         let mut count = 0;
-        while !self.is_rx_empty() {
+        while !self.is_rx_empty() && count < out.len() {
             let byte = self.usart.uartrbr().read().bits() as u8;
             if self.is_rx_frame_err() {
                 return Err(Error::Frame);
@@ -115,11 +113,51 @@ impl Read for Usart<'_> {
 
             out[count] = byte;
             count += 1;
-            if count == out.len() - 1 {
-                break;
-            }
         }
         Ok(count)
+    }
+}
+
+// embedded-hal implementation for nb interfaces
+impl Write<u8> for Usart<'_> {
+    type Error = Error;
+
+    fn flush(&mut self) -> nb::Result<(), Error> {
+        if self.is_tx_idle() {
+            Ok(())
+        } else {
+            Err(nb::Error::WouldBlock)
+        }
+    }
+
+    fn write(&mut self, byte: u8) -> nb::Result<(), Error> {
+        if !self.is_tx_full() {
+            self.usart.uartthr().write(|w| unsafe { w.bits(byte as u32) });
+            Ok(())
+        } else {
+            Err(nb::Error::WouldBlock)
+        }
+    }
+}
+
+impl Read<u8> for Usart<'_> {
+    type Error = Error;
+
+    fn read(&mut self) -> nb::Result<u8, Self::Error> {
+        if !self.is_rx_empty() {
+            let byte = self.usart.uartrbr().read().bits() as u8;
+            if self.is_rx_frame_err() {
+                Err(nb::Error::Other(Error::Frame))
+            } else if self.is_rx_parity_err() {
+                Err(nb::Error::Other(Error::Parity))
+            } else if self.is_rx_noise_err() {
+                Err(nb::Error::Other(Error::Noise))
+            } else {
+                Ok(byte.try_into().unwrap_lite())
+            }
+        } else {
+            Err(nb::Error::WouldBlock)
+        }
     }
 }
 
@@ -132,7 +170,6 @@ pub enum Rate {
 impl<'a> Usart<'a> {
     pub fn set_rate(self, rate: Rate) -> Self {
         // These baud rates assume that the uart clock is set to 24Mhz.
-
         // Enable DLAB to access divisor latch registers
         self.usart.uartlcr().modify(|_, w| w.dlab().set_bit());
 
@@ -160,9 +197,9 @@ impl<'a> Usart<'a> {
     pub fn interrupt_enable(self) -> Self {
         self.usart.uartier().write(|w| {
             w.erbfi().set_bit(); // Enable Received Data Available Interrupt
-                                 // w.etbei().set_bit(); // Enable Transmitter Holding Register Empty Interrupt
-                                 // w.elsi().set_bit(); // Enable Receiver Line Status Interrupt
-                                 // w.edssi().set_bit() // Enable Modem Status Interrupt
+            // w.etbei().set_bit(); // Enable Transmitter Holding Register Empty Interrupt
+            // w.elsi().set_bit(); // Enable Receiver Line Status Interrupt
+            // w.edssi().set_bit() // Enable Modem Status Interrupt
             w
         });
 
@@ -170,6 +207,9 @@ impl<'a> Usart<'a> {
     }
 
     pub fn set_8n1(self) -> Self {
+        // Configure 8N1: 8 data bits, no parity, 1 stop bit
+        // self.usart.uartlcr().write( |w| {
+        // });
         self
     }
 
@@ -201,6 +241,10 @@ impl<'a> Usart<'a> {
         .unwrap_or(InterruptDecoding::Unknown)
     }
 
+    pub fn read_interrupt_status_raw(&self) -> u8 {
+        self.usart.uartiir().read().intdecoding_table().bits() & 0x07
+    }
+
     pub fn read_line_status(&self) -> u8 {
         self.usart.uartlsr().read().bits() as u8
     }
@@ -220,7 +264,6 @@ impl<'a> Usart<'a> {
     }
 
     pub fn clear_tx_idle_interrupt(&self) {
-        // self.usart.uartier().write(|w| w.etbei().clear_bit());
         self.usart.uartier().modify(|_, w| w.etbei().clear_bit());
     }
 
