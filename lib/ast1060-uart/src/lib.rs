@@ -172,7 +172,6 @@ impl<'a> Usart<'a> {
         // These baud rates assume that the uart clock is set to 24Mhz.
         // Enable DLAB to access divisor latch registers
         self.usart.uartlcr().modify(|_, w| w.dlab().set_bit());
-
         // Divisor = 24M / (13 * 16 * Baud Rate)
         match rate {
             Rate::Baud9600 => {
