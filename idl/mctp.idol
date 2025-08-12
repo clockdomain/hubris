@@ -1,0 +1,8 @@
+// MCTP-Router IPC interface
+
+Interface(
+    name: "MCTP",
+    ops: {
+        // TBD
+    },
+)
