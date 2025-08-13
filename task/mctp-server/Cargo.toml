@@ -9,7 +9,7 @@ userlib = { path = "../../sys/userlib", features = ["panic-messages"] }
 # This section is here to discourage RLS/rust-analyzer from doing test builds,
 # since test builds don't work for cross compilation.
 [[bin]]
-name = "task-template"
+name = "mctp-server"
 test = false
 doctest = false
 bench = false

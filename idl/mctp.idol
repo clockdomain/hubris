@@ -3,6 +3,67 @@
 Interface(
     name: "MCTP",
     ops: {
-        // TBD
+        "req": (
+            doc: "Create a request channel with a target `eid`",
+            args: {
+                "eid": "u8",
+            },
+            reply: Result(
+                ok: "GenericHandle",
+                err: CLike("ServerError"),
+            ),
+        ),
+        "listener": (
+            doc: "Create a `Listener` instance receiving messages for the given `typ`",
+            args: {
+                "typ": "u8",
+            },
+            reply: Result(
+                ok: "GenericHandle",
+                err: CLike("ServerError"),
+            ),
+        ),
+        "get_eid": (
+            doc: "Retrieve the EID assigned to the stack",
+            reply: Simple("u8"),
+            idempotent: true,
+        ),
+        "set_eid": (
+            doc: "Set the EID assigned to the stack",
+            args: {
+                "eid": "u8",
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("ServerError"),
+            ),
+        ),
+        "recv": (   // TODO Is one recv sufficient for listener and requests, or do we need two?
+            doc: "Receive a single message matched by the `Listener`",
+            args: {
+                "handle": "GenericHandle",
+            },
+            leases: {
+                "buf": (type: "[u8]", write: true),
+            },
+            reply: Result(
+                ok: "RecvMetadata",
+                err: CLike("ServerError"),
+            ),
+            encoding: Hubpack
+        ),
+        "send": (
+            doc: "Send a single message, either as a request or response",
+            args: {
+                "handle": "GenericHandle",
+            },
+            leases: {
+                "buf": (type: "[u8]", read: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("ServerError"),
+            ),
+        ),
     },
 )

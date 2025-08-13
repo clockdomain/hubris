@@ -4,6 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+num-traits = { workspace = true }
+counters = { path = "../../lib/counters" }
+userlib = { path = "../../sys/userlib" }
+zerocopy = { workspace = true }
+zerocopy-derive = { workspace = true }
+derive-idol-err = { path = "../../lib/derive-idol-err"  }
+hubpack = { workspace = true }
+serde = { workspace = true }
+
+[build-dependencies]
+idol = { workspace = true }
 
 [lints]
 workspace = true
