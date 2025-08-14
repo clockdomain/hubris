@@ -3169,13 +3169,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "hello-world-task"
-version = "0.1.0"
-dependencies = [
- "userlib",
-]
-
-[[package]]
 name = "hermit-abi"
 version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3788,6 +3781,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60302e4db3a61da70c0cb7991976248362f30319e88850c487b9b95bbf059e00"
 
 [[package]]
+name = "mctp"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8280034c4afaa377d825c17261987ff26a638369ea4b46919e1726741eec253"
+
+[[package]]
 name = "mctp-api"
 version = "0.1.0"
 dependencies = [
@@ -3795,11 +3794,20 @@ dependencies = [
  "derive-idol-err",
  "hubpack",
  "idol",
+ "mctp",
  "num-traits",
  "serde",
  "userlib",
  "zerocopy 0.8.25",
  "zerocopy-derive 0.8.25",
+]
+
+[[package]]
+name = "mctp-echo"
+version = "0.1.0"
+dependencies = [
+ "mctp-api",
+ "userlib",
 ]
 
 [[package]]

@@ -50,20 +50,24 @@ Interface(
                 ok: "RecvMetadata",
                 err: CLike("ServerError"),
             ),
-            encoding: Hubpack
+            encoding: Hubpack,
         ),
         "send": (
-            doc: "Send a single message, either as a request or response",
+            doc: "Send a single message, either as a request or response, returning the message tag",
             args: {
                 "handle": "GenericHandle",
+                "typ": "u8",
+                "tag": "Option<u8>",
+                "ic": "bool",
             },
             leases: {
                 "buf": (type: "[u8]", read: true),
             },
             reply: Result(
-                ok: "()",
+                ok: "u8",
                 err: CLike("ServerError"),
             ),
+            encoding: Hubpack,
         ),
     },
 )
