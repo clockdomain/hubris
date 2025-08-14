@@ -3806,6 +3806,7 @@ dependencies = [
 name = "mctp-echo"
 version = "0.1.0"
 dependencies = [
+ "mctp",
  "mctp-api",
  "userlib",
 ]
