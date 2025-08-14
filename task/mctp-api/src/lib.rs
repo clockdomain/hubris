@@ -6,6 +6,12 @@ use mctp::{
 };
 use userlib::TaskId;
 
+/// A MCTP router backed by a hubris MCTP server.
+///
+/// Applications can use [`req()`](Self::req) and [`listener()`](Self::listener)
+/// to optain instances of the [`mctp`] traits via IPC calls to a MCTP server task.
+///
+/// A router can be obtained from a corresponding MCTP server [`TaskId`].
 #[derive(Clone, Debug)]
 pub struct Router {
     ipc: ipc::MCTP,
@@ -41,6 +47,7 @@ impl Router {
     }
 }
 
+/// A request channel
 #[derive(Debug)]
 pub struct RouterReqChannel<'r> {
     router: &'r Router,
@@ -48,7 +55,6 @@ pub struct RouterReqChannel<'r> {
     eid: Eid,
     sent_tag: Option<Tag>,
 }
-
 impl ReqChannel for RouterReqChannel<'_> {
     fn send_vectored(
         &mut self,
@@ -104,6 +110,7 @@ impl ReqChannel for RouterReqChannel<'_> {
     }
 }
 
+/// A listener that listens for a specific message type
 #[derive(Debug)]
 pub struct RouterListener<'r> {
     router: &'r Router,
@@ -153,6 +160,7 @@ impl Listener for RouterListener<'_> {
     }
 }
 
+/// A response channel for an incoming MCTP message
 #[derive(Debug)]
 pub struct RouterRespChannel<'r> {
     router: &'r Router,
@@ -195,13 +203,17 @@ impl<'r> RespChannel for RouterRespChannel<'r> {
 }
 
 mod ipc {
-    //! IPC API and associated types
+    //! Raw IPC API and associated types
+    //!
+    //! Used by the [`Router`](crate::Router) and server implementation.
+    //! Usually an application will not use this interface directly.
 
     use derive_idol_err::IdolError;
     use hubpack::SerializedSize;
     use serde::{Deserialize, Serialize};
     use userlib::*;
 
+    /// Metadata returned by a successful [`recv`](MCTP::recv).
     #[derive(Clone, Copy, Debug, Serialize, SerializedSize, Deserialize)]
     #[repr(C)]
     pub struct RecvMetadata {
@@ -213,6 +225,7 @@ mod ipc {
         pub resp_handle: Option<GenericHandle>,
     }
 
+    /// Errors reported by the MCTP server
     #[derive(Clone, Copy, Debug, FromPrimitive, IdolError, counters::Count)]
     #[repr(u32)]
     #[non_exhaustive]
@@ -229,6 +242,7 @@ mod ipc {
         }
     }
 
+    /// A generic handle for a listener, request or response channel.
     #[derive(
         Clone,
         Copy,
