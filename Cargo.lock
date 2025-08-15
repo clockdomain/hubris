@@ -1043,6 +1043,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "digest-server"
+version = "0.1.0"
+dependencies = [
+ "build-util",
+ "cortex-m",
+ "counters",
+ "drv-digest-api",
+ "heapless 0.7.17",
+ "idol",
+ "idol-runtime",
+ "num-derive 0.4.2",
+ "num-traits",
+ "ringbuf",
+ "userlib",
+ "zerocopy 0.8.25",
+]
+
+[[package]]
 name = "drv-ast1060-uart"
 version = "0.1.0"
 dependencies = [
@@ -1133,20 +1151,6 @@ version = "0.1.0"
 dependencies = [
  "unwrap-lite",
  "volatile-const",
-]
-
-[[package]]
-name = "drv-clock-api"
-version = "0.1.0"
-dependencies = [
- "counters",
- "derive-idol-err",
- "idol",
- "idol-runtime",
- "num-traits",
- "userlib",
- "zerocopy 0.8.25",
- "zerocopy-derive 0.8.25",
 ]
 
 [[package]]
@@ -5609,6 +5613,7 @@ dependencies = [
 name = "task-helloworld"
 version = "0.1.0"
 dependencies = [
+ "drv-digest-api",
  "userlib",
 ]
 

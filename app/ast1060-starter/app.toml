@@ -6,7 +6,7 @@ stacksize = 1024
 
 [kernel]
 name = "ast1060-starter"
-requires = {flash = 20000, ram = 3072}
+requires = {flash = 25000, ram = 4096}
 
 [tasks.jefe]
 name = "task-jefe"
@@ -33,10 +33,17 @@ notifications = ["uart-irq"]
 interrupts = {"uart.irq" = "uart-irq"}
 # task-slots = ["rcc_driver"]
 
+[tasks.digest_server]
+name = "digest-server"
+priority = 2
+max-sizes = {flash = 16384, ram = 8192}
+start = true
+stacksize = 3200
+
 [tasks.helloworld]
 name = "task-helloworld"
 priority = 3
-max-sizes = {flash = 8192, ram = 2048}
+max-sizes = {flash = 8192, ram = 4096}
 uses = ["uart"]
 start = true
-task-slots = ["uart_driver"]
+task-slots = ["uart_driver", "digest_server"]
