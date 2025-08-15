@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = ["mock"]
-mock = []
+mock = ["openprot-platform-mock"]
 
 [dependencies]
 userlib = { path = "../../sys/userlib" }
@@ -22,6 +22,8 @@ num-traits = { workspace = true }
 # Logging and debugging
 ringbuf = { path = "../../lib/ringbuf" }
 counters = { path = "../../lib/counters" }
+openprot-hal-blocking = { workspace = true }
+openprot-platform-mock = { workspace = true, optional = true }
 
 [lints]
 workspace = true

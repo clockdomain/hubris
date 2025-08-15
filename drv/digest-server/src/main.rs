@@ -1,18 +1,45 @@
 #![no_std]
 #![no_main]
 
+//! # Generic Digest Server
+//!
+//! Hardware-accelerated cryptographic digest service for the Hubris operating system.
+//! 
+//! This server is generic over any hardware device that implements the OpenPRoT
+//! digest HAL traits, allowing it to work with different hardware backends:
+//! 
+//! - `MockDigestDevice`: Software mock implementation for testing
+//! - Any hardware accelerator implementing `DigestInit` + `DigestCtrlReset` traits
+//!
+//! ## Usage with Custom Hardware
+//! 
+//! To use with a custom hardware device:
+//! ```rust
+//! let hardware = MyCustomDigestDevice::new();
+//! let server = ServerImpl::new(hardware);
+//! ```
+//!
+//! The hardware device must implement:
+//! - `DigestInit<Sha2_256>` - SHA-256 initialization
+//! - `DigestInit<Sha2_384>` - SHA-384 initialization  
+//! - `DigestInit<Sha2_512>` - SHA-512 initialization
+//! - `DigestCtrlReset` - Hardware reset capability
+
 use drv_digest_api::{DigestError};
 use idol_runtime::{Leased, LenLimit, RequestError, R, W};
 use userlib::*;
 
 use openprot_hal_blocking::digest::{
-    DigestInit, DigestOp,
+    DigestInit, DigestOp, DigestCtrlReset, ErrorType,
     Sha2_256, Sha2_384, Sha2_512, Digest
 };
 use openprot_platform_mock::hash::MockDigestDevice;
 
 // Re-export the API that was generated from digest.idol.
 include!(concat!(env!("OUT_DIR"), "/server_stub.rs"));
+
+// Type alias for the default server implementation using MockDevice
+type DefaultServerImpl = ServerImpl<MockDigestDevice>;
 
 // Maximum number of concurrent digest sessions
 const MAX_SESSIONS: usize = 8;
@@ -60,15 +87,27 @@ static mut SESSION_STORAGE: [SessionData; MAX_SESSIONS] = [SessionData {
     timeout: None,
 }; MAX_SESSIONS];
 
-// Server implementation with MockDevice backend
-pub struct ServerImpl {
-    hardware: MockDigestDevice,
+// Server implementation generic over any device that implements digest traits
+pub struct ServerImpl<D> 
+where
+    D: DigestInit<Sha2_256, Output = Digest<8>> 
+     + DigestInit<Sha2_384, Output = Digest<12>> 
+     + DigestInit<Sha2_512, Output = Digest<16>> 
+     + DigestCtrlReset,
+{
+    hardware: D,
 }
 
-impl ServerImpl {
-    pub fn new() -> Self {
+impl<D> ServerImpl<D> 
+where
+    D: DigestInit<Sha2_256, Output = Digest<8>> 
+     + DigestInit<Sha2_384, Output = Digest<12>> 
+     + DigestInit<Sha2_512, Output = Digest<16>> 
+     + DigestCtrlReset,
+{
+    pub fn new(hardware: D) -> Self {
         Self {
-            hardware: MockDigestDevice::new(),
+            hardware,
         }
     }
 
@@ -140,7 +179,13 @@ impl ServerImpl {
     }
 }
 
-impl InOrderDigestImpl for ServerImpl {
+impl<D> InOrderDigestImpl for ServerImpl<D> 
+where
+    D: DigestInit<Sha2_256, Output = Digest<8>> 
+     + DigestInit<Sha2_384, Output = Digest<12>> 
+     + DigestInit<Sha2_512, Output = Digest<16>> 
+     + DigestCtrlReset,
+{
     fn init_sha256(
         &mut self,
         _msg: &RecvMessage,
@@ -457,7 +502,13 @@ impl InOrderDigestImpl for ServerImpl {
     }
 }
 
-impl idol_runtime::NotificationHandler for ServerImpl {
+impl<D> idol_runtime::NotificationHandler for ServerImpl<D> 
+where
+    D: DigestInit<Sha2_256, Output = Digest<8>> 
+     + DigestInit<Sha2_384, Output = Digest<12>> 
+     + DigestInit<Sha2_512, Output = Digest<16>> 
+     + DigestCtrlReset,
+{
     fn current_notification_mask(&self) -> u32 {
         // We don't use notifications in this implementation
         0
@@ -470,8 +521,9 @@ impl idol_runtime::NotificationHandler for ServerImpl {
 
 #[export_name = "main"]
 fn main() -> ! {
-    // Initialize the server
-    let mut server = ServerImpl::new();
+    // Initialize the server with a MockDevice
+    let hardware = MockDigestDevice::new();
+    let mut server = ServerImpl::new(hardware);
     let mut buffer = [0u8; idl::INCOMING_SIZE];
     
     // Run the server using the standard dispatch pattern
