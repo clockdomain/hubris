@@ -1,220 +1,466 @@
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
-
-//! # Digest Server
-//!
-//! Hardware-accelerated cryptographic digest service for the Hubris operating system.
-//! Implements the digest.idol interface to provide SHA-2 family hash computations
-//! with session-based and one-shot APIs.
-//!
-//! ## Supported Algorithms
-//! - SHA-256: 256-bit hash (8 × 32-bit words output)
-//! - SHA-384: 384-bit hash (12 × 32-bit words output)  
-//! - SHA-512: 512-bit hash (16 × 32-bit words output)
-//!
-//! ## Hardware Backends
-//! - `mock`: Software mock implementation for testing
-//! - `stm32h7`: STM32H7 hardware acceleration (future)
-//!
-//! ## Architecture
-//! ```text
-//! Client Task → IPC (Idol) → Digest Server → Hardware Backend
-//! ```
-
 #![no_std]
 #![no_main]
 
-use core::convert::Infallible;
-use heapless::FnvIndexMap;
-use idol_runtime::{ClientError, Leased, LenLimit, NotificationHandler, RequestError, R, W};
+use drv_digest_api::{DigestError};
+use idol_runtime::{Leased, LenLimit, RequestError, R, W};
 use userlib::*;
-use drv_digest_api::DigestError;
-use ringbuf::*;
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-// Import the generated server stub
+use openprot_hal_blocking::digest::{
+    DigestInit, DigestOp,
+    Sha2_256, Sha2_384, Sha2_512, Digest
+};
+use openprot_platform_mock::hash::MockDigestDevice;
+
+// Re-export the API that was generated from digest.idol.
 include!(concat!(env!("OUT_DIR"), "/server_stub.rs"));
 
-/// Maximum number of concurrent digest sessions
+// Maximum number of concurrent digest sessions
 const MAX_SESSIONS: usize = 8;
 
-/// Maximum data size per update operation (bytes)
-const MAX_UPDATE_SIZE: usize = 1024;
+// Session timeout in ticks (adjust as needed)
+const SESSION_TIMEOUT_TICKS: u64 = 10_000;
 
-/// Digest algorithm enumeration
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum DigestAlgorithm {
+// Session buffer size - keep this reasonable
+const SESSION_BUFFER_SIZE: usize = 512;
+
+// Session states for different hash algorithms
+#[derive(Copy, Clone)]
+pub enum SessionAlgorithm {
+    Free,
     Sha256,
-    Sha384,
+    Sha384, 
     Sha512,
-    Sha3_256,
-    Sha3_384,
-    Sha3_512,
 }
 
-/// Digest computation context for session state
-#[derive(Debug)]
-pub struct DigestContext {
-    /// Algorithm being computed
-    algorithm: DigestAlgorithm,
-    /// Internal hash state (enough space for SHA-512)
-    state: [u32; 16],
-    /// Number of bytes processed so far
-    bytes_processed: u64,
-    /// Initialization status
-    initialized: bool,
+// Session data stored separately from the server struct
+#[derive(Copy, Clone)]
+pub struct SessionData {
+    algorithm: SessionAlgorithm,
+    buffer: [u8; SESSION_BUFFER_SIZE],
+    length: usize,
+    timeout: Option<u64>,
 }
 
-impl DigestContext {
-    /// Create a new digest context for the specified algorithm
-    pub fn new(algorithm: DigestAlgorithm) -> Self {
+impl Default for SessionData {
+    fn default() -> Self {
         Self {
-            algorithm,
-            state: [0u32; 16],
-            bytes_processed: 0,
-            initialized: true,
+            algorithm: SessionAlgorithm::Free,
+            buffer: [0u8; SESSION_BUFFER_SIZE],
+            length: 0,
+            timeout: None,
         }
-    }
-
-    /// Reset the context to its initial state
-    pub fn reset(&mut self) {
-        self.state.fill(0);
-        self.bytes_processed = 0;
-        self.initialized = true;
-    }
-
-    /// Update the context with new data
-    pub fn update(&mut self, data: &[u8]) -> Result<(), DigestError> {
-        if !self.initialized {
-            return Err(DigestError::NotInitialized);
-        }
-
-        // Mock implementation: just update the byte counter
-        // In a real implementation, this would feed data to the hardware
-        self.bytes_processed += data.len() as u64;
-        
-        // Simple hash simulation: XOR all bytes into state[0]
-        for &byte in data {
-            self.state[0] ^= byte as u32;
-        }
-        
-        Ok(())
-    }
-
-    /// Finalize the digest and produce the hash result
-    pub fn finalize(&mut self, output: &mut [u32]) -> Result<(), DigestError> {
-        if !self.initialized {
-            return Err(DigestError::NotInitialized);
-        }
-
-        let expected_words = match self.algorithm {
-            DigestAlgorithm::Sha256 | DigestAlgorithm::Sha3_256 => 8,
-            DigestAlgorithm::Sha384 | DigestAlgorithm::Sha3_384 => 12,
-            DigestAlgorithm::Sha512 | DigestAlgorithm::Sha3_512 => 16,
-        };
-
-        if output.len() < expected_words {
-            return Err(DigestError::InvalidOutputSize);
-        }
-
-        // Mock hash result based on algorithm and processed bytes
-        let base_value: u32 = match self.algorithm {
-            DigestAlgorithm::Sha256 => 0x6a09e667,
-            DigestAlgorithm::Sha384 => 0xcbbb9d5d,
-            DigestAlgorithm::Sha512 => 0x6a09e667,
-            _ => return Err(DigestError::UnsupportedAlgorithm),
-        };
-
-        // Generate mock hash result
-        for i in 0..expected_words {
-            output[i] = base_value.wrapping_add(self.state[0]).wrapping_add(i as u32);
-        }
-
-        // Include the byte count in the final word for uniqueness
-        output[expected_words - 1] = output[expected_words - 1]
-            .wrapping_add(self.bytes_processed as u32);
-
-        Ok(())
     }
 }
 
-/// Digest session state
-#[derive(Debug)]
-struct DigestSession {
-    /// The digest computation context
-    context: DigestContext,
-}
+// Global session storage - allocated statically to avoid stack overflow
+static mut SESSION_STORAGE: [SessionData; MAX_SESSIONS] = [SessionData {
+    algorithm: SessionAlgorithm::Free,
+    buffer: [0u8; SESSION_BUFFER_SIZE],
+    length: 0,
+    timeout: None,
+}; MAX_SESSIONS];
 
-/// Main digest server implementation
-struct ServerImpl {
-    /// Active digest sessions mapped by session ID
-    sessions: FnvIndexMap<u32, DigestSession, MAX_SESSIONS>,
-    /// Next session ID to allocate
-    next_session_id: u32,
+// Server implementation with MockDevice backend
+pub struct ServerImpl {
+    hardware: MockDigestDevice,
 }
 
 impl ServerImpl {
-    /// Create a new digest server
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            sessions: FnvIndexMap::new(),
-            next_session_id: 1,
+            hardware: MockDigestDevice::new(),
         }
     }
 
-    /// Allocate a new digest session
-    fn allocate_session(&mut self, algorithm: DigestAlgorithm) -> Result<u32, DigestError> {
-        if self.sessions.len() >= MAX_SESSIONS {
-            return Err(DigestError::TooManySessions);
+    fn find_free_session(&self) -> Result<usize, DigestError> {
+        unsafe {
+            for (index, session) in SESSION_STORAGE.iter().enumerate() {
+                if matches!(session.algorithm, SessionAlgorithm::Free) {
+                    return Ok(index);
+                }
+            }
         }
-
-        let session_id = self.next_session_id;
-        self.next_session_id = self.next_session_id.wrapping_add(1);
-
-        let session = DigestSession {
-            context: DigestContext::new(algorithm),
-        };
-
-        self.sessions
-            .insert(session_id, session)
-            .map_err(|_| DigestError::TooManySessions)?;
-
-        ringbuf_entry!(Trace::SessionAllocated(session_id));
-        Ok(session_id)
+        Err(DigestError::TooManySessions)
     }
 
-    /// Get a mutable reference to a session
-    fn get_session_mut(&mut self, session_id: u32) -> Result<&mut DigestSession, DigestError> {
-        self.sessions
-            .get_mut(&session_id)
-            .ok_or(DigestError::InvalidSession)
-    }
-
-    /// Remove a session
-    fn remove_session(&mut self, session_id: u32) -> Result<(), DigestError> {
-        self.sessions
-            .remove(&session_id)
-            .ok_or(DigestError::InvalidSession)?;
+    fn validate_session(&self, session_id: u32) -> Result<usize, DigestError> {
+        let index = session_id as usize;
+        if index >= MAX_SESSIONS {
+            return Err(DigestError::InvalidSession);
+        }
         
-        ringbuf_entry!(Trace::SessionFinalized(session_id));
+        unsafe {
+            if matches!(SESSION_STORAGE[index].algorithm, SessionAlgorithm::Free) {
+                return Err(DigestError::InvalidSession);
+            }
+        }
+        
+        Ok(index)
+    }
+
+    fn cleanup_expired_sessions(&mut self) {
+        let current_time = sys_get_timer().now;
+        
+        unsafe {
+            for session in SESSION_STORAGE.iter_mut() {
+                if let Some(timeout_time) = session.timeout {
+                    if current_time > timeout_time {
+                        session.algorithm = SessionAlgorithm::Free;
+                        session.length = 0;
+                        session.timeout = None;
+                    }
+                }
+            }
+        }
+    }
+
+    fn update_session_timeout(&mut self, index: usize) {
+        unsafe {
+            SESSION_STORAGE[index].timeout = Some(sys_get_timer().now + SESSION_TIMEOUT_TICKS);
+        }
+    }
+
+    // Static dispatch methods - no runtime algorithm selection
+    fn compute_sha256_hash(&mut self, data: &[u8]) -> Result<Digest<8>, DigestError> {
+        let mut ctx = self.hardware.init(Sha2_256).map_err(|_| DigestError::HardwareFailure)?;
+        ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
+        ctx.finalize().map_err(|_| DigestError::HardwareFailure)
+    }
+    
+    fn compute_sha384_hash(&mut self, data: &[u8]) -> Result<Digest<12>, DigestError> {
+        let mut ctx = self.hardware.init(Sha2_384).map_err(|_| DigestError::HardwareFailure)?;
+        ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
+        ctx.finalize().map_err(|_| DigestError::HardwareFailure)
+    }
+    
+    fn compute_sha512_hash(&mut self, data: &[u8]) -> Result<Digest<16>, DigestError> {
+        let mut ctx = self.hardware.init(Sha2_512).map_err(|_| DigestError::HardwareFailure)?;
+        ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
+        ctx.finalize().map_err(|_| DigestError::HardwareFailure)
+    }
+}
+
+impl InOrderDigestImpl for ServerImpl {
+    fn init_sha256(
+        &mut self,
+        _msg: &RecvMessage,
+    ) -> Result<u32, RequestError<DigestError>> {
+        self.cleanup_expired_sessions();
+        
+        let index = self.find_free_session().map_err(RequestError::Runtime)?;
+        
+        unsafe {
+            SESSION_STORAGE[index].algorithm = SessionAlgorithm::Sha256;
+            SESSION_STORAGE[index].length = 0;
+        }
+        self.update_session_timeout(index);
+        
+        Ok(index as u32)
+    }
+
+    fn init_sha384(
+        &mut self,
+        _msg: &RecvMessage,
+    ) -> Result<u32, RequestError<DigestError>> {
+        self.cleanup_expired_sessions();
+        
+        let index = self.find_free_session().map_err(RequestError::Runtime)?;
+        
+        unsafe {
+            SESSION_STORAGE[index].algorithm = SessionAlgorithm::Sha384;
+            SESSION_STORAGE[index].length = 0;
+        }
+        self.update_session_timeout(index);
+        
+        Ok(index as u32)
+    }
+
+    fn init_sha512(
+        &mut self,
+        _msg: &RecvMessage,
+    ) -> Result<u32, RequestError<DigestError>> {
+        self.cleanup_expired_sessions();
+        
+        let index = self.find_free_session().map_err(RequestError::Runtime)?;
+        
+        unsafe {
+            SESSION_STORAGE[index].algorithm = SessionAlgorithm::Sha512;
+            SESSION_STORAGE[index].length = 0;
+        }
+        self.update_session_timeout(index);
+        
+        Ok(index as u32)
+    }
+
+    fn init_sha3_256(
+        &mut self,
+        _msg: &RecvMessage,
+    ) -> Result<u32, RequestError<DigestError>> {
+        // SHA-3 not supported by MockDigestDevice
+        Err(RequestError::Runtime(DigestError::UnsupportedAlgorithm))
+    }
+
+    fn init_sha3_384(
+        &mut self,
+        _msg: &RecvMessage,
+    ) -> Result<u32, RequestError<DigestError>> {
+        // SHA-3 not supported by MockDigestDevice
+        Err(RequestError::Runtime(DigestError::UnsupportedAlgorithm))
+    }
+
+    fn init_sha3_512(
+        &mut self,
+        _msg: &RecvMessage,
+    ) -> Result<u32, RequestError<DigestError>> {
+        // SHA-3 not supported by MockDigestDevice
+        Err(RequestError::Runtime(DigestError::UnsupportedAlgorithm))
+    }
+
+    fn update(
+        &mut self,
+        _msg: &RecvMessage,
+        session_id: u32,
+        len: u32,
+        data: LenLimit<Leased<R, [u8]>, 1024>,
+    ) -> Result<(), RequestError<DigestError>> {
+        let index = self.validate_session(session_id).map_err(RequestError::Runtime)?;
+        self.update_session_timeout(index);
+        
+        let len = len as usize;
+        if len > data.len() || len > 1024 {
+            return Err(RequestError::Runtime(DigestError::InvalidInputLength));
+        }
+        
+        // Read data into a temporary buffer
+        let mut buffer = [0u8; 1024];
+        data.read_range(0..len, &mut buffer[..len])
+            .map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+            
+        // Append to session data
+        unsafe {
+            let session = &mut SESSION_STORAGE[index];
+            if session.length + len > SESSION_BUFFER_SIZE {
+                return Err(RequestError::Runtime(DigestError::MemoryAllocationFailure));
+            }
+            
+            session.buffer[session.length..session.length + len].copy_from_slice(&buffer[..len]);
+            session.length += len;
+        }
+        
         Ok(())
     }
 
-    /// Perform a one-shot digest operation
-    fn digest_oneshot(&mut self, algorithm: DigestAlgorithm, data: &[u8], output: &mut [u32]) -> Result<(), DigestError> {
-        let mut context = DigestContext::new(algorithm);
-        context.update(data)?;
-        context.finalize(output)?;
+    fn finalize_sha256(
+        &mut self,
+        _msg: &RecvMessage,
+        session_id: u32,
+        digest: Leased<W, [u32; 8]>,
+    ) -> Result<(), RequestError<DigestError>> {
+        let index = self.validate_session(session_id).map_err(RequestError::Runtime)?;
         
-        ringbuf_entry!(Trace::OneShot(data.len() as u32));
+        let (session_data, data_len) = unsafe {
+            let session = &mut SESSION_STORAGE[index];
+            if !matches!(session.algorithm, SessionAlgorithm::Sha256) {
+                return Err(RequestError::Runtime(DigestError::InvalidSession));
+            }
+            
+            // Get a copy of the data and reset the session
+            let mut data = [0u8; SESSION_BUFFER_SIZE];
+            let len = session.length;
+            data[..len].copy_from_slice(&session.buffer[..len]);
+            
+            session.algorithm = SessionAlgorithm::Free;
+            session.length = 0;
+            session.timeout = None;
+            
+            (data, len)
+        };
+        
+        let hash_result = self.compute_sha256_hash(&session_data[..data_len]).map_err(RequestError::Runtime)?;
+        
+        digest.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+        Ok(())
+    }
+
+    fn finalize_sha384(
+        &mut self,
+        _msg: &RecvMessage,
+        session_id: u32,
+        digest: Leased<W, [u32; 12]>,
+    ) -> Result<(), RequestError<DigestError>> {
+        let index = self.validate_session(session_id).map_err(RequestError::Runtime)?;
+        
+        let (session_data, data_len) = unsafe {
+            let session = &mut SESSION_STORAGE[index];
+            if !matches!(session.algorithm, SessionAlgorithm::Sha384) {
+                return Err(RequestError::Runtime(DigestError::InvalidSession));
+            }
+            
+            // Get a copy of the data and reset the session
+            let mut data = [0u8; SESSION_BUFFER_SIZE];
+            let len = session.length;
+            data[..len].copy_from_slice(&session.buffer[..len]);
+            
+            session.algorithm = SessionAlgorithm::Free;
+            session.length = 0;
+            session.timeout = None;
+            
+            (data, len)
+        };
+        
+        let hash_result = self.compute_sha384_hash(&session_data[..data_len]).map_err(RequestError::Runtime)?;
+        
+        digest.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+        Ok(())
+    }
+
+    fn finalize_sha512(
+        &mut self,
+        _msg: &RecvMessage,
+        session_id: u32,
+        digest: Leased<W, [u32; 16]>,
+    ) -> Result<(), RequestError<DigestError>> {
+        let index = self.validate_session(session_id).map_err(RequestError::Runtime)?;
+        
+        let (session_data, data_len) = unsafe {
+            let session = &mut SESSION_STORAGE[index];
+            if !matches!(session.algorithm, SessionAlgorithm::Sha512) {
+                return Err(RequestError::Runtime(DigestError::InvalidSession));
+            }
+            
+            // Get a copy of the data and reset the session
+            let mut data = [0u8; SESSION_BUFFER_SIZE];
+            let len = session.length;
+            data[..len].copy_from_slice(&session.buffer[..len]);
+            
+            session.algorithm = SessionAlgorithm::Free;
+            session.length = 0;
+            session.timeout = None;
+            
+            (data, len)
+        };
+        
+        let hash_result = self.compute_sha512_hash(&session_data[..data_len]).map_err(RequestError::Runtime)?;
+        
+        digest.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+        Ok(())
+    }
+
+    fn finalize_sha3_256(
+        &mut self,
+        _msg: &RecvMessage,
+        _session_id: u32,
+        _digest: Leased<W, [u32; 8]>,
+    ) -> Result<(), RequestError<DigestError>> {
+        Err(RequestError::Runtime(DigestError::UnsupportedAlgorithm))
+    }
+
+    fn finalize_sha3_384(
+        &mut self,
+        _msg: &RecvMessage,
+        _session_id: u32,
+        _digest: Leased<W, [u32; 12]>,
+    ) -> Result<(), RequestError<DigestError>> {
+        Err(RequestError::Runtime(DigestError::UnsupportedAlgorithm))
+    }
+
+    fn finalize_sha3_512(
+        &mut self,
+        _msg: &RecvMessage,
+        _session_id: u32,
+        _digest: Leased<W, [u32; 16]>,
+    ) -> Result<(), RequestError<DigestError>> {
+        Err(RequestError::Runtime(DigestError::UnsupportedAlgorithm))
+    }
+
+    fn reset(
+        &mut self,
+        _msg: &RecvMessage,
+        session_id: u32,
+    ) -> Result<(), RequestError<DigestError>> {
+        let index = self.validate_session(session_id).map_err(RequestError::Runtime)?;
+        
+        unsafe {
+            SESSION_STORAGE[index].algorithm = SessionAlgorithm::Free;
+            SESSION_STORAGE[index].length = 0;
+            SESSION_STORAGE[index].timeout = None;
+        }
+        
+        Ok(())
+    }
+
+    // One-shot digest operations
+    fn digest_oneshot_sha256(
+        &mut self,
+        _msg: &RecvMessage,
+        len: u32,
+        data: LenLimit<Leased<R, [u8]>, 1024>,
+        digest_out: Leased<W, [u32; 8]>,
+    ) -> Result<(), RequestError<DigestError>> {
+        let len = len as usize;
+        if len > data.len() || len > 1024 {
+            return Err(RequestError::Runtime(DigestError::InvalidInputLength));
+        }
+        
+        let mut buffer = [0u8; 1024];
+        data.read_range(0..len, &mut buffer[..len])
+            .map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+            
+        let hash_result = self.compute_sha256_hash(&buffer[..len]).map_err(RequestError::Runtime)?;
+        
+        digest_out.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+        Ok(())
+    }
+
+    fn digest_oneshot_sha384(
+        &mut self,
+        _msg: &RecvMessage,
+        len: u32,
+        data: LenLimit<Leased<R, [u8]>, 1024>,
+        digest_out: Leased<W, [u32; 12]>,
+    ) -> Result<(), RequestError<DigestError>> {
+        let len = len as usize;
+        if len > data.len() || len > 1024 {
+            return Err(RequestError::Runtime(DigestError::InvalidInputLength));
+        }
+        
+        let mut buffer = [0u8; 1024];
+        data.read_range(0..len, &mut buffer[..len])
+            .map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+            
+        let hash_result = self.compute_sha384_hash(&buffer[..len]).map_err(RequestError::Runtime)?;
+        
+        digest_out.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+        Ok(())
+    }
+
+    fn digest_oneshot_sha512(
+        &mut self,
+        _msg: &RecvMessage,
+        len: u32,
+        data: LenLimit<Leased<R, [u8]>, 1024>,
+        digest_out: Leased<W, [u32; 16]>,
+    ) -> Result<(), RequestError<DigestError>> {
+        let len = len as usize;
+        if len > data.len() || len > 1024 {
+            return Err(RequestError::Runtime(DigestError::InvalidInputLength));
+        }
+        
+        let mut buffer = [0u8; 1024];
+        data.read_range(0..len, &mut buffer[..len])
+            .map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+            
+        let hash_result = self.compute_sha512_hash(&buffer[..len]).map_err(RequestError::Runtime)?;
+        
+        digest_out.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
         Ok(())
     }
 }
 
-impl NotificationHandler for ServerImpl {
+impl idol_runtime::NotificationHandler for ServerImpl {
     fn current_notification_mask(&self) -> u32 {
-        0 // We don't use notifications
+        // We don't use notifications in this implementation
+        0
     }
 
     fn handle_notification(&mut self, _bits: u32) {
@@ -222,270 +468,19 @@ impl NotificationHandler for ServerImpl {
     }
 }
 
-/// Implementation of the Idol-generated digest interface
-impl InOrderDigestImpl for ServerImpl {
-    /// Initialize SHA-256 digest session
-    fn init_sha256(
-        &mut self,
-        _: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        let session_id = self.allocate_session(DigestAlgorithm::Sha256)?;
-        Ok(session_id)
-    }
-
-    /// Initialize SHA-384 digest session
-    fn init_sha384(
-        &mut self,
-        _: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        let session_id = self.allocate_session(DigestAlgorithm::Sha384)?;
-        Ok(session_id)
-    }
-
-    /// Initialize SHA-512 digest session
-    fn init_sha512(
-        &mut self,
-        _: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        let session_id = self.allocate_session(DigestAlgorithm::Sha512)?;
-        Ok(session_id)
-    }
-
-    /// Initialize SHA3-256 digest session (not implemented)
-    fn init_sha3_256(
-        &mut self,
-        _: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        Err(DigestError::UnsupportedAlgorithm.into())
-    }
-
-    /// Initialize SHA3-384 digest session (not implemented)
-    fn init_sha3_384(
-        &mut self,
-        _: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        Err(DigestError::UnsupportedAlgorithm.into())
-    }
-
-    /// Initialize SHA3-512 digest session (not implemented)
-    fn init_sha3_512(
-        &mut self,
-        _: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        Err(DigestError::UnsupportedAlgorithm.into())
-    }
-
-    /// Update digest session with new data
-    fn update(
-        &mut self,
-        _: &RecvMessage,
-        session_id: u32,
-        len: u32,
-        data: LenLimit<Leased<R, [u8]>, MAX_UPDATE_SIZE>,
-    ) -> Result<(), RequestError<DigestError>> {
-        // Read data from leased memory
-        let mut buffer = [0u8; MAX_UPDATE_SIZE];
-        let actual_len = core::cmp::min(len as usize, data.len());
-        data.read_range(0..actual_len, &mut buffer[..actual_len])
-            .map_err(|_| RequestError::Fail(ClientError::WentAway))?;
-
-        // Get the session and update it
-        let session = self.get_session_mut(session_id)?;
-        session.context.update(&buffer[..actual_len])?;
-
-        ringbuf_entry!(Trace::DigestUpdate(session_id, actual_len as u32));
-        Ok(())
-    }
-
-    /// Finalize SHA-256 digest session
-    fn finalize_sha256(
-        &mut self,
-        _: &RecvMessage,
-        session_id: u32,
-        digest_out: Leased<W, [u32; 8]>,
-    ) -> Result<(), RequestError<DigestError>> {
-        // Get the session and finalize it
-        let session = self.get_session_mut(session_id)?;
-        let mut result = [0u32; 8];
-        session.context.finalize(&mut result)?;
-
-        // Write result to leased memory using write method
-        digest_out.write(result)
-            .map_err(|_| RequestError::Fail(ClientError::WentAway))?;
-
-        // Remove the session
-        self.remove_session(session_id)?;
-        Ok(())
-    }
-
-    /// Finalize SHA-384 digest session
-    fn finalize_sha384(
-        &mut self,
-        _: &RecvMessage,
-        session_id: u32,
-        digest_out: Leased<W, [u32; 12]>,
-    ) -> Result<(), RequestError<DigestError>> {
-        let session = self.get_session_mut(session_id)?;
-        let mut result = [0u32; 12];
-        session.context.finalize(&mut result)?;
-
-        digest_out.write(result)
-            .map_err(|_| RequestError::Fail(ClientError::WentAway))?;
-
-        self.remove_session(session_id)?;
-        Ok(())
-    }
-
-    /// Finalize SHA-512 digest session
-    fn finalize_sha512(
-        &mut self,
-        _: &RecvMessage,
-        session_id: u32,
-        digest_out: Leased<W, [u32; 16]>,
-    ) -> Result<(), RequestError<DigestError>> {
-        let session = self.get_session_mut(session_id)?;
-        let mut result = [0u32; 16];
-        session.context.finalize(&mut result)?;
-
-        digest_out.write(result)
-            .map_err(|_| RequestError::Fail(ClientError::WentAway))?;
-
-        self.remove_session(session_id)?;
-        Ok(())
-    }
-
-    /// Finalize SHA3-256 digest session (not implemented)
-    fn finalize_sha3_256(
-        &mut self,
-        _: &RecvMessage,
-        _session_id: u32,
-        _digest_out: Leased<W, [u32; 8]>,
-    ) -> Result<(), RequestError<DigestError>> {
-        Err(DigestError::UnsupportedAlgorithm.into())
-    }
-
-    /// Finalize SHA3-384 digest session (not implemented)
-    fn finalize_sha3_384(
-        &mut self,
-        _: &RecvMessage,
-        _session_id: u32,
-        _digest_out: Leased<W, [u32; 12]>,
-    ) -> Result<(), RequestError<DigestError>> {
-        Err(DigestError::UnsupportedAlgorithm.into())
-    }
-
-    /// Finalize SHA3-512 digest session (not implemented)
-    fn finalize_sha3_512(
-        &mut self,
-        _: &RecvMessage,
-        _session_id: u32,
-        _digest_out: Leased<W, [u32; 16]>,
-    ) -> Result<(), RequestError<DigestError>> {
-        Err(DigestError::UnsupportedAlgorithm.into())
-    }
-
-    /// Reset a digest session
-    fn reset(
-        &mut self,
-        _: &RecvMessage,
-        session_id: u32,
-    ) -> Result<(), RequestError<DigestError>> {
-        let session = self.get_session_mut(session_id)?;
-        session.context.reset();
-        Ok(())
-    }
-
-    /// One-shot SHA-256 digest operation
-    fn digest_oneshot_sha256(
-        &mut self,
-        _: &RecvMessage,
-        len: u32,
-        data: LenLimit<Leased<R, [u8]>, MAX_UPDATE_SIZE>,
-        digest_out: Leased<W, [u32; 8]>,
-    ) -> Result<(), RequestError<DigestError>> {
-        // Read data from leased memory
-        let mut buffer = [0u8; MAX_UPDATE_SIZE];
-        let actual_len = core::cmp::min(len as usize, data.len());
-        data.read_range(0..actual_len, &mut buffer[..actual_len])
-            .map_err(|_| RequestError::Fail(ClientError::WentAway))?;
-
-        // Perform one-shot digest
-        let mut result = [0u32; 8];
-        self.digest_oneshot(DigestAlgorithm::Sha256, &buffer[..actual_len], &mut result)?;
-
-        // Write result to leased memory
-        digest_out.write(result)
-            .map_err(|_| RequestError::Fail(ClientError::WentAway))?;
-
-        Ok(())
-    }
-
-    /// One-shot SHA-384 digest operation
-    fn digest_oneshot_sha384(
-        &mut self,
-        _: &RecvMessage,
-        len: u32,
-        data: LenLimit<Leased<R, [u8]>, MAX_UPDATE_SIZE>,
-        digest_out: Leased<W, [u32; 12]>,
-    ) -> Result<(), RequestError<DigestError>> {
-        let mut buffer = [0u8; MAX_UPDATE_SIZE];
-        let actual_len = core::cmp::min(len as usize, data.len());
-        data.read_range(0..actual_len, &mut buffer[..actual_len])
-            .map_err(|_| RequestError::Fail(ClientError::WentAway))?;
-
-        let mut result = [0u32; 12];
-        self.digest_oneshot(DigestAlgorithm::Sha384, &buffer[..actual_len], &mut result)?;
-
-        digest_out.write(result)
-            .map_err(|_| RequestError::Fail(ClientError::WentAway))?;
-
-        Ok(())
-    }
-
-    /// One-shot SHA-512 digest operation
-    fn digest_oneshot_sha512(
-        &mut self,
-        _: &RecvMessage,
-        len: u32,
-        data: LenLimit<Leased<R, [u8]>, MAX_UPDATE_SIZE>,
-        digest_out: Leased<W, [u32; 16]>,
-    ) -> Result<(), RequestError<DigestError>> {
-        let mut buffer = [0u8; MAX_UPDATE_SIZE];
-        let actual_len = core::cmp::min(len as usize, data.len());
-        data.read_range(0..actual_len, &mut buffer[..actual_len])
-            .map_err(|_| RequestError::Fail(ClientError::WentAway))?;
-
-        let mut result = [0u32; 16];
-        self.digest_oneshot(DigestAlgorithm::Sha512, &buffer[..actual_len], &mut result)?;
-
-        digest_out.write(result)
-            .map_err(|_| RequestError::Fail(ClientError::WentAway))?;
-
-        Ok(())
-    }
-}
-
-/// Trace events for debugging and monitoring
-#[derive(Copy, Clone, PartialEq)]
-enum Trace {
-    None,
-    SessionAllocated(u32),
-    SessionFinalized(u32),
-    DigestUpdate(u32, u32), // session_id, data_len
-    OneShot(u32),           // data_len
-}
-
-ringbuf!(Trace, 16, Trace::None);
-
-/// Main entry point
 #[export_name = "main"]
 fn main() -> ! {
+    // Initialize the server
     let mut server = ServerImpl::new();
-    let mut buffer = [0u8; 1024];
-
-    ringbuf_entry!(Trace::None);
-
+    let mut buffer = [0u8; idl::INCOMING_SIZE];
+    
+    // Run the server using the standard dispatch pattern
     loop {
         idol_runtime::dispatch(&mut buffer, &mut server);
     }
+}
+
+mod idl {
+    use drv_digest_api::DigestError;
+    include!(concat!(env!("OUT_DIR"), "/server_stub.rs"));
 }

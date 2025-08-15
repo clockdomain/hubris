@@ -36,7 +36,7 @@ interrupts = {"uart.irq" = "uart-irq"}
 [tasks.digest_server]
 name = "digest-server"
 priority = 2
-max-sizes = {flash = 16384, ram = 8192}
+max-sizes = {flash = 16384, ram = 16384}
 start = true
 stacksize = 3200
 

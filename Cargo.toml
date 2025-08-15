@@ -137,8 +137,8 @@ toml = { version = "0.7", default-features = false, features = ["parse", "displa
 toml_edit = { version = "0.19", default-features = false }
 vcell = { version = "0.1.2", default-features = false }
 walkdir = { version = "2.0.0", default-features = false }
-zerocopy = { version = "0.8.25", default-features = false }
-zerocopy-derive = { version = "0.8.25", default-features = false }
+zerocopy = { version = "0.8.26", default-features = false }
+zerocopy-derive = { version = "0.8.26", default-features = false }
 zeroize = { version = "1.5.7", default-features = false, features = ["zeroize_derive"] }
 zip = { version = "0.6", default-features = false, features = ["bzip2", "deflate", "zstd"] }
 
@@ -162,6 +162,9 @@ tlvc-text = { git = "https://github.com/oxidecomputer/tlvc", default-features = 
 transceiver-messages = { git = "https://github.com/oxidecomputer/transceiver-control/", default-features = false }
 vsc7448-pac = { git = "https://github.com/oxidecomputer/vsc7448", default-features = false }
 
+## OpenPRot Initiative
+openprot-hal-blocking = { git = "https://github.com/OpenPRoT/openprot" , branch = "driver-model-doc" }
+openprot-platform-mock = { git = "https://github.com/OpenPRoT/openprot" , branch = "driver-model-doc" }
 [workspace.lints.rust]
 elided_lifetimes_in_paths = "warn"
 
