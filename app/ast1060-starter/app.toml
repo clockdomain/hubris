@@ -43,7 +43,8 @@ stacksize = 3200
 [tasks.helloworld]
 name = "task-helloworld"
 priority = 3
-max-sizes = {flash = 8192, ram = 4096}
+max-sizes = {flash = 12288, ram = 4096}
+stacksize = 2048
 uses = ["uart"]
 start = true
 task-slots = ["uart_driver", "digest_server"]

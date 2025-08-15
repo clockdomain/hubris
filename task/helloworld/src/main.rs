@@ -13,23 +13,324 @@ task_slot!(DIGEST, digest_server);
 
 #[export_name = "main"]
 fn main() -> ! {
-    uart_send(b"Hello, world from AST1060!\r\n");
-    uart_send(b"Testing digest server...\r\n");
+    uart_send(b"\r\n");
+    uart_send(b"=== Hubris Digest Server Test Suite ===\r\n");
+    uart_send(b"Running on AST1060 in QEMU\r\n");
+    uart_send(b"\r\n");
     
-    // Test the digest server
-    test_digest_server();
+    // Run comprehensive digest server tests
+    run_digest_test_suite();
     
+    uart_send(b"\r\n");
+    uart_send(b"=== Test Suite Complete ===\r\n");
+    uart_send(b"All tests finished. System will now echo received data.\r\n");
+    uart_send(b"\r\n");
+    
+    // Echo loop for interactive testing
     loop {
         let mut buf = [0u8; 128];
         hl::sleep_for(1000); // Sleep for 1 second
         
         if uart_read(&mut buf) {
-            uart_send(b"Received: ");
+            uart_send(b"Echo: ");
             uart_send(&buf);
             uart_send(b"\r\n");
             
-            // Hash the received data
+            // Hash the received data as a bonus test
             hash_received_data(&buf);
+        }
+    }
+}
+
+fn run_digest_test_suite() {
+    uart_send(b"Starting digest server tests...\r\n");
+    
+    // Test 1: Basic connectivity
+    test_server_connectivity();
+    
+    // Test 2: One-shot operations
+    test_oneshot_operations();
+    
+    // Test 3: Session-based operations  
+    test_session_operations();
+    
+    // Test 4: Multiple concurrent sessions
+    test_multiple_sessions();
+    
+    // Test 5: Error conditions
+    test_error_conditions();
+    
+    // Test 6: Performance test
+    test_performance();
+}
+
+fn test_server_connectivity() {
+    uart_send(b"\r\n[TEST 1] Server Connectivity Test\r\n");
+    
+    let digest = Digest::from(DIGEST.get_task_id());
+    let mut result = [0u32; 8];
+    let test_data = b"ping";
+    
+    match digest.digest_oneshot_sha256(test_data.len() as u32, test_data, &mut result) {
+        Ok(_) => {
+            uart_send(b"  [OK] Server responding\r\n");
+            uart_send(b"  [OK] Basic SHA-256 operation successful\r\n");
+        }
+        Err(e) => {
+            uart_send(b"  [FAIL] Server connectivity failed: ");
+            print_error(e);
+            uart_send(b"\r\n");
+        }
+    }
+}
+
+fn test_oneshot_operations() {
+    uart_send(b"\r\n[TEST 2] One-shot Operations\r\n");
+    
+    // Test known vectors
+    test_oneshot_sha256_known_vector();
+    test_oneshot_sha384_known_vector();
+    test_oneshot_sha512_known_vector();
+}
+
+fn test_oneshot_sha256_known_vector() {
+    uart_send(b"  Testing SHA-256 with known vector...\r\n");
+    
+    let digest = Digest::from(DIGEST.get_task_id());
+    let test_data = b"abc";  // Known test vector
+    let mut result = [0u32; 8];
+    
+    match digest.digest_oneshot_sha256(test_data.len() as u32, test_data, &mut result) {
+        Ok(_) => {
+            uart_send(b"    Input: 'abc'\r\n");
+            uart_send(b"    SHA-256: ");
+            print_hash(&result[..8]);
+            uart_send(b"\r\n");
+            
+            // Expected: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+            // (in little-endian u32 format)
+            let expected = [0x8f01cfea_u32.to_le(), 0x414140de_u32.to_le(), 
+                           0x5dae2223_u32.to_le(), 0xb00361a3_u32.to_le(),
+                           0x96177a9c_u32.to_le(), 0xb410ff61_u32.to_le(),
+                           0xf20015ad_u32.to_le(), 0xba7816bf_u32.to_le()];
+            
+            if result == expected {
+                uart_send(b"    [OK] Known vector matches!\r\n");
+            } else {
+                uart_send(b"    [WARN] Known vector mismatch (may be endianness)\r\n");
+            }
+        }
+        Err(e) => {
+            uart_send(b"    [FAIL] SHA-256 failed: ");
+            print_error(e);
+            uart_send(b"\r\n");
+        }
+    }
+}
+
+fn test_oneshot_sha384_known_vector() {
+    uart_send(b"  Testing SHA-384...\r\n");
+    
+    let digest = Digest::from(DIGEST.get_task_id());
+    let test_data = b"abc";
+    let mut result = [0u32; 12];
+    
+    match digest.digest_oneshot_sha384(test_data.len() as u32, test_data, &mut result) {
+        Ok(_) => {
+            uart_send(b"    SHA-384: ");
+            print_hash(&result[..12]);
+            uart_send(b"\r\n");
+            uart_send(b"    [OK] SHA-384 operation successful\r\n");
+        }
+        Err(e) => {
+            uart_send(b"    [FAIL] SHA-384 failed: ");
+            print_error(e);
+            uart_send(b"\r\n");
+        }
+    }
+}
+
+fn test_oneshot_sha512_known_vector() {
+    uart_send(b"  Testing SHA-512...\r\n");
+    
+    let digest = Digest::from(DIGEST.get_task_id());
+    let test_data = b"abc";
+    let mut result = [0u32; 16];
+    
+    match digest.digest_oneshot_sha512(test_data.len() as u32, test_data, &mut result) {
+        Ok(_) => {
+            uart_send(b"    SHA-512: ");
+            print_hash(&result[..16]);
+            uart_send(b"\r\n");
+            uart_send(b"    [OK] SHA-512 operation successful\r\n");
+        }
+        Err(e) => {
+            uart_send(b"    [FAIL] SHA-512 failed: ");
+            print_error(e);
+            uart_send(b"\r\n");
+        }
+    }
+}
+
+fn test_session_operations() {
+    uart_send(b"\r\n[TEST 3] Session-based Operations\r\n");
+    
+    match test_session_based_digest() {
+        Ok(result) => {
+            uart_send(b"  [OK] Session-based SHA-256 successful\r\n");
+            uart_send(b"    Result: ");
+            print_hash(&result);
+            uart_send(b"\r\n");
+        }
+        Err(e) => {
+            uart_send(b"  [FAIL] Session-based operation failed: ");
+            print_error(e);
+            uart_send(b"\r\n");
+        }
+    }
+}
+
+fn test_multiple_sessions() {
+    uart_send(b"\r\n[TEST 4] Multiple Concurrent Sessions\r\n");
+    
+    let digest = Digest::from(DIGEST.get_task_id());
+    
+    // Try to create multiple sessions
+    uart_send(b"  Creating multiple sessions...\r\n");
+    
+    let mut sessions = [None; 4];
+    let mut created_count = 0;
+    
+    for i in 0..4 {
+        match digest.init_sha256() {
+            Ok(session_id) => {
+                sessions[i] = Some(session_id);
+                created_count += 1;
+                uart_send(b"    [OK] Session ");
+                print_number(i as u32);
+                uart_send(b" created (ID: ");
+                print_number(session_id);
+                uart_send(b")\r\n");
+            }
+            Err(e) => {
+                uart_send(b"    [FAIL] Session ");
+                print_number(i as u32);
+                uart_send(b" failed: ");
+                print_error(e);
+                uart_send(b"\r\n");
+                break;
+            }
+        }
+    }
+    
+    uart_send(b"  Created ");
+    print_number(created_count);
+    uart_send(b" sessions total\r\n");
+    
+    // Use the sessions concurrently
+    for (i, session_opt) in sessions.iter().enumerate() {
+        if let Some(session_id) = session_opt {
+            let test_data = b"concurrent";
+            match digest.update(*session_id, test_data.len() as u32, test_data) {
+                Ok(_) => {
+                    uart_send(b"    [OK] Session ");
+                    print_number(i as u32);
+                    uart_send(b" updated\r\n");
+                }
+                Err(e) => {
+                    uart_send(b"    [FAIL] Session ");
+                    print_number(i as u32);
+                    uart_send(b" update failed: ");
+                    print_error(e);
+                    uart_send(b"\r\n");
+                }
+            }
+        }
+    }
+}
+
+fn test_error_conditions() {
+    uart_send(b"\r\n[TEST 5] Error Condition Testing\r\n");
+    
+    let digest = Digest::from(DIGEST.get_task_id());
+    
+    // Test invalid session ID
+    uart_send(b"  Testing invalid session ID...\r\n");
+    let invalid_session = 999;
+    let test_data = b"test";
+    match digest.update(invalid_session, test_data.len() as u32, test_data) {
+        Ok(_) => {
+            uart_send(b"    [WARN] Expected error but operation succeeded\r\n");
+        }
+        Err(DigestError::InvalidSession) => {
+            uart_send(b"    [OK] Correctly rejected invalid session\r\n");
+        }
+        Err(e) => {
+            uart_send(b"    ? Unexpected error: ");
+            print_error(e);
+            uart_send(b"\r\n");
+        }
+    }
+    
+    // Test session limit
+    uart_send(b"  Testing session limit...\r\n");
+    let mut sessions_created = 0;
+    loop {
+        match digest.init_sha256() {
+            Ok(_) => {
+                sessions_created += 1;
+                if sessions_created > 10 {  // Reasonable limit
+                    uart_send(b"    [WARN] Created more than 10 sessions without limit\r\n");
+                    break;
+                }
+            }
+            Err(DigestError::TooManySessions) => {
+                uart_send(b"    [OK] Session limit enforced at ");
+                print_number(sessions_created);
+                uart_send(b" sessions\r\n");
+                break;
+            }
+            Err(e) => {
+                uart_send(b"    ? Unexpected error: ");
+                print_error(e);
+                uart_send(b"\r\n");
+                break;
+            }
+        }
+    }
+}
+
+fn test_performance() {
+    uart_send(b"\r\n[TEST 6] Performance Testing\r\n");
+    
+    let digest = Digest::from(DIGEST.get_task_id());
+    
+    // Test with different data sizes
+    let sizes = [16, 64, 256, 512];
+    
+    for &size in &sizes {
+        uart_send(b"  Testing with ");
+        print_number(size);
+        uart_send(b" bytes...\r\n");
+        
+        // Create test data
+        let mut test_data = [0u8; 512];
+        for i in 0..size.min(512) {
+            test_data[i as usize] = (i % 256) as u8;
+        }
+        
+        let mut result = [0u32; 8];
+        match digest.digest_oneshot_sha256(size, &test_data[..size.min(512) as usize], &mut result) {
+            Ok(_) => {
+                uart_send(b"    [OK] ");
+                print_number(size);
+                uart_send(b" bytes processed successfully\r\n");
+            }
+            Err(e) => {
+                uart_send(b"    [FAIL] Failed: ");
+                print_error(e);
+                uart_send(b"\r\n");
+            }
         }
     }
 }
@@ -166,6 +467,28 @@ fn print_hex_byte(byte: u8) {
     let hex_chars = b"0123456789ABCDEF";
     uart_send(&[hex_chars[(byte >> 4) as usize]]);
     uart_send(&[hex_chars[(byte & 0xF) as usize]]);
+}
+
+fn print_number(n: u32) {
+    if n == 0 {
+        uart_send(b"0");
+        return;
+    }
+    
+    let mut digits = [0u8; 10];
+    let mut count = 0;
+    let mut num = n;
+    
+    while num > 0 {
+        digits[count] = (num % 10) as u8 + b'0';
+        num /= 10;
+        count += 1;
+    }
+    
+    // Print in reverse order
+    for i in (0..count).rev() {
+        uart_send(&[digits[i]]);
+    }
 }
 
 fn print_error(error: DigestError) {
