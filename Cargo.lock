@@ -3403,6 +3403,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hmac-api"
+version = "0.1.0"
+dependencies = [
+ "counters",
+ "derive-idol-err",
+ "hubpack",
+ "idol",
+ "idol-runtime",
+ "num-traits",
+ "serde",
+ "userlib",
+ "zerocopy 0.8.26",
+ "zerocopy-derive 0.8.26",
+]
+
+[[package]]
 name = "host-sp-messages"
 version = "0.1.0"
 dependencies = [
@@ -5635,6 +5651,7 @@ name = "task-helloworld"
 version = "0.1.0"
 dependencies = [
  "drv-digest-api",
+ "hmac-api",
  "userlib",
 ]
 

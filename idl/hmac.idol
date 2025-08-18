@@ -1,0 +1,147 @@
+// MAC (Message Authentication Code) IPC API
+
+Interface(
+    name: "Mac",
+    ops: {
+        "init_hmac_sha256": (
+            args: {
+                "key_len": "u32",
+            },
+            leases: {
+                "key": (type: "[u8]", read: true, max_len: Some(128)),
+            },
+            reply: Result(
+                ok: "u32", // Returns session ID for the MAC context
+                err: CLike("MacError"),
+            ),
+        ),
+        "init_hmac_sha384": (
+            args: {
+                "key_len": "u32",
+            },
+            leases: {
+                "key": (type: "[u8]", read: true, max_len: Some(128)),
+            },
+            reply: Result(
+                ok: "u32", // Returns session ID for the MAC context
+                err: CLike("MacError"),
+            ),
+        ),
+        "init_hmac_sha512": (
+            args: {
+                "key_len": "u32",
+            },
+            leases: {
+                "key": (type: "[u8]", read: true, max_len: Some(128)),
+            },
+            reply: Result(
+                ok: "u32", // Returns session ID for the MAC context
+                err: CLike("MacError"),
+            ),
+        ),
+        "update": (
+            args: {
+                "session_id": "u32",
+                "len": "u32",
+            },
+            leases: {
+                "data": (type: "[u8]", read: true, max_len: Some(1024)),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("MacError"),
+            ),
+        ),
+        "finalize_hmac_sha256": (
+            args: {
+                "session_id": "u32",
+            },
+            leases: {
+                "mac_out": (type: "[u8; 32]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("MacError"),
+            ),
+        ),
+        "finalize_hmac_sha384": (
+            args: {
+                "session_id": "u32",
+            },
+            leases: {
+                "mac_out": (type: "[u8; 48]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("MacError"),
+            ),
+        ),
+        "finalize_hmac_sha512": (
+            args: {
+                "session_id": "u32",
+            },
+            leases: {
+                "mac_out": (type: "[u8; 64]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("MacError"),
+            ),
+        ),
+        "reset": (
+            args: {
+                "session_id": "u32",
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("MacError"),
+            ),
+        ),
+        "mac_oneshot_hmac_sha256": (
+            args: {
+                "key_len": "u32",
+                "data_len": "u32",
+            },
+            leases: {
+                "key": (type: "[u8]", read: true, max_len: Some(128)),
+                "data": (type: "[u8]", read: true, max_len: Some(1024)),
+                "mac_out": (type: "[u8; 32]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("MacError"),
+            ),
+        ),
+        "mac_oneshot_hmac_sha384": (
+            args: {
+                "key_len": "u32",
+                "data_len": "u32",
+            },
+            leases: {
+                "key": (type: "[u8]", read: true, max_len: Some(128)),
+                "data": (type: "[u8]", read: true, max_len: Some(1024)),
+                "mac_out": (type: "[u8; 48]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("MacError"),
+            ),
+        ),
+        "mac_oneshot_hmac_sha512": (
+            args: {
+                "key_len": "u32",
+                "data_len": "u32",
+            },
+            leases: {
+                "key": (type: "[u8]", read: true, max_len: Some(128)),
+                "data": (type: "[u8]", read: true, max_len: Some(1024)),
+                "mac_out": (type: "[u8; 64]", write: true),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("MacError"),
+            ),
+        ),
+    },
+)
+
