@@ -3794,6 +3794,7 @@ dependencies = [
  "derive-idol-err",
  "hubpack",
  "idol",
+ "idol-runtime",
  "mctp",
  "num-traits",
  "serde",
@@ -3815,7 +3816,16 @@ dependencies = [
 name = "mctp-server"
 version = "0.1.0"
 dependencies = [
+ "counters",
+ "hubpack",
+ "idol",
+ "idol-runtime",
+ "mctp-api",
+ "num-traits",
+ "serde",
  "userlib",
+ "zerocopy 0.8.25",
+ "zerocopy-derive 0.8.25",
 ]
 
 [[package]]

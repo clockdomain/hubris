@@ -18,3 +18,10 @@ fn main() -> ! {
         // will turn this into a single undefined instruction.
     }
 }
+
+mod ipc {
+    use counters::*;
+    use mctp_api::ipc::*;
+
+    include!(concat!(env!("OUT_DIR"), "/server_stub.rs"));
+}

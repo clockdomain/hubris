@@ -1,3 +1,12 @@
+//! ## High-level interface
+//! Applications can use the [`Stack`] to configure the hubris mctp-server-task,
+//! or to obtain [listener](MctpListener), [request](MctpReqChannel) and [response](MctpRespChannel) handles that implement
+//! the standard [`mctp`] traits.
+//!
+//! ## IPC API
+//! The raw IPC interface can be accessed through the [ipc] module.
+//! It is used by the high-level interface to communicate with the server task.
+
 #![no_std]
 
 use mctp::{
@@ -6,36 +15,36 @@ use mctp::{
 };
 use userlib::TaskId;
 
-/// A MCTP router backed by a hubris MCTP server.
+/// A MCTP stack backed by a hubris MCTP server.
 ///
 /// Applications can use [`req()`](Self::req) and [`listener()`](Self::listener)
 /// to optain instances of the [`mctp`] traits via IPC calls to a MCTP server task.
 ///
-/// A router can be obtained from a corresponding MCTP server [`TaskId`].
+/// A stack can be obtained from a corresponding MCTP server [`TaskId`].
 #[derive(Clone, Debug)]
-pub struct Router {
-    ipc: ipc::MCTP,
+pub struct Stack {
+    ipc: ipc::client::MCTP,
 }
-impl From<TaskId> for Router {
+impl From<TaskId> for Stack {
     fn from(value: TaskId) -> Self {
-        Router { ipc: value.into() }
+        Stack { ipc: value.into() }
     }
 }
 
-impl Router {
-    pub fn req(&self, eid: Eid) -> mctp::Result<RouterReqChannel<'_>> {
+impl Stack {
+    pub fn req(&self, eid: Eid) -> mctp::Result<MctpReqChannel<'_>> {
         let handle = self.ipc.req(eid.0)?;
-        Ok(RouterReqChannel {
-            router: self,
+        Ok(MctpReqChannel {
+            stack: self,
             handle,
             eid,
             sent_tag: None,
         })
     }
-    pub fn listener(&self, typ: MsgType) -> mctp::Result<RouterListener<'_>> {
+    pub fn listener(&self, typ: MsgType) -> mctp::Result<MctpListener<'_>> {
         let handle = self.ipc.listener(typ.0)?;
-        Ok(RouterListener {
-            router: self,
+        Ok(MctpListener {
+            stack: self,
             handle,
         })
     }
@@ -49,13 +58,13 @@ impl Router {
 
 /// A request channel
 #[derive(Debug)]
-pub struct RouterReqChannel<'r> {
-    router: &'r Router,
+pub struct MctpReqChannel<'r> {
+    stack: &'r Stack,
     handle: ipc::GenericHandle,
     eid: Eid,
     sent_tag: Option<Tag>,
 }
-impl ReqChannel for RouterReqChannel<'_> {
+impl ReqChannel for MctpReqChannel<'_> {
     fn send_vectored(
         &mut self,
         typ: mctp::MsgType,
@@ -88,7 +97,7 @@ impl ReqChannel for RouterReqChannel<'_> {
             remote_eid,
             size,
             resp_handle: _,
-        } = self.router.ipc.recv(self.handle, buf)?;
+        } = self.stack.ipc.recv(self.handle, buf)?;
         debug_assert_eq!(tv.0, msg_tag);
         debug_assert_eq!(self.eid.0, remote_eid);
         let ic = mctp::MsgIC(msg_ic);
@@ -103,7 +112,7 @@ impl ReqChannel for RouterReqChannel<'_> {
         if self.sent_tag.is_some() {
             return Err(Error::BadArgument);
         }
-        let tv = self.router.ipc.send(self.handle, typ.0, None, false, buf)?;
+        let tv = self.stack.ipc.send(self.handle, typ.0, None, false, buf)?;
         let tag = Tag::Owned(mctp::TagValue(tv));
         self.sent_tag = Some(tag);
         Ok(())
@@ -112,12 +121,12 @@ impl ReqChannel for RouterReqChannel<'_> {
 
 /// A listener that listens for a specific message type
 #[derive(Debug)]
-pub struct RouterListener<'r> {
-    router: &'r Router,
+pub struct MctpListener<'r> {
+    stack: &'r Stack,
     handle: ipc::GenericHandle,
 }
-impl Listener for RouterListener<'_> {
-    type RespChannel<'a> = RouterRespChannel<'a>
+impl Listener for MctpListener<'_> {
+    type RespChannel<'a> = MctpRespChannel<'a>
     where
         Self: 'a;
 
@@ -137,14 +146,14 @@ impl Listener for RouterListener<'_> {
             remote_eid,
             size,
             resp_handle,
-        } = self.router.ipc.recv(self.handle, buf)?;
+        } = self.stack.ipc.recv(self.handle, buf)?;
 
         let Some(resp_handle) = resp_handle else {
             return Err(Error::InternalError);
         };
 
-        let resp_channel = RouterRespChannel {
-            router: self.router,
+        let resp_channel = MctpRespChannel {
+            stack: self.stack,
             handle: resp_handle,
             eid: Eid(remote_eid),
             typ: MsgType(msg_typ),
@@ -162,15 +171,15 @@ impl Listener for RouterListener<'_> {
 
 /// A response channel for an incoming MCTP message
 #[derive(Debug)]
-pub struct RouterRespChannel<'r> {
-    router: &'r Router,
+pub struct MctpRespChannel<'r> {
+    stack: &'r Stack,
     handle: ipc::GenericHandle,
     eid: Eid,
     typ: MsgType,
     tv: TagValue,
 }
-impl<'r> RespChannel for RouterRespChannel<'r> {
-    type ReqChannel = RouterReqChannel<'r>;
+impl<'r> RespChannel for MctpRespChannel<'r> {
+    type ReqChannel = MctpReqChannel<'r>;
 
     fn send_vectored(
         &mut self,
@@ -190,22 +199,22 @@ impl<'r> RespChannel for RouterRespChannel<'r> {
     }
 
     fn req_channel(&self) -> mctp::Result<Self::ReqChannel> {
-        self.router.req(self.eid)
+        self.stack.req(self.eid)
     }
 
     fn send(&mut self, buf: &[u8]) -> mctp::Result<()> {
         Ok(self
-            .router
+            .stack
             .ipc
             .send(self.handle, self.typ.0, Some(self.tv.0), false, buf)
             .map(|_| ())?)
     }
 }
 
-mod ipc {
+pub mod ipc {
     //! Raw IPC API and associated types
     //!
-    //! Used by the [`Router`](crate::Router) and server implementation.
+    //! Used by the [`Stack`](crate::Stack) and server implementation.
     //! Usually an application will not use this interface directly.
 
     use derive_idol_err::IdolError;
@@ -213,7 +222,7 @@ mod ipc {
     use serde::{Deserialize, Serialize};
     use userlib::*;
 
-    /// Metadata returned by a successful [`recv`](MCTP::recv).
+    /// Metadata returned by a successful [`recv`](client::MCTP::recv).
     #[derive(Clone, Copy, Debug, Serialize, SerializedSize, Deserialize)]
     #[repr(C)]
     pub struct RecvMetadata {
@@ -230,14 +239,18 @@ mod ipc {
     #[repr(u32)]
     #[non_exhaustive]
     pub enum ServerError {
-        InternalError = 1,
+        #[idol(server_death)]
+        ServerRestarted = 1,
+        InternalError = 2,
     }
 
     impl From<ServerError> for mctp::Error {
         fn from(value: ServerError) -> Self {
             use mctp::Error::*;
+            // this will probably map nearly 1:1 once everything is implemented
             match value {
                 ServerError::InternalError => InternalError,
+                ServerError::ServerRestarted => InternalError,
             }
         }
     }
@@ -257,5 +270,8 @@ mod ipc {
     #[repr(transparent)]
     pub struct GenericHandle(u8);
 
-    include!(concat!(env!("OUT_DIR"), "/client_stub.rs"));
+    pub mod client {
+        use super::*;
+        include!(concat!(env!("OUT_DIR"), "/client_stub.rs"));
+    }
 }

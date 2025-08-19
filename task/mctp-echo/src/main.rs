@@ -12,17 +12,17 @@
 #![no_main]
 
 use mctp::{Eid, Listener, MsgType, RespChannel};
-use mctp_api::{Router, RouterListener};
+use mctp_api::{MctpListener, Stack};
 use userlib::*;
 
 task_slot!(MCTP, mctp);
 
 #[export_name = "main"]
 fn main() -> ! {
-    let router = mctp_api::Router::from(mctp);
+    let stack = mctp_api::Stack::from(mctp);
 
-    router.set_eid(Eid(8)).unwrap_lite();
-    let listener = router.listener(MsgType(1)).unwrap_lite();
+    stack.set_eid(Eid(8)).unwrap_lite();
+    let listener = stack.listener(MsgType(1)).unwrap_lite();
     let mut recv_buf = [0; 255];
 
     loop {
