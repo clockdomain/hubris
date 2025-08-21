@@ -1,101 +1,148 @@
 #![no_std]
 #![no_main]
 
-//! # Generic Digest Server
+//! # Digest Server
 //!
 //! Hardware-accelerated cryptographic digest service for the Hubris operating system.
 //! 
-//! This server is generic over any hardware device that implements the OpenPRoT
-//! digest HAL traits, allowing it to work with different hardware backends:
-//! 
+//! This server provides both session-based and one-shot digest operations using the 
+//! OpenPRoT HAL traits with concrete `Digest<N>` output types.
+//!
+//! ## Supported Operations
+//! - **Session-based**: `init` → multiple `update` → `finalize` (for streaming)
+//! - **One-shot**: `digest_oneshot_*` (complete hash in single call)
+//!
+//! ## Algorithms Supported
+//! - SHA-256: `Digest<8>` (256-bit output)
+//! - SHA-384: `Digest<12>` (384-bit output)
+//! - SHA-512: `Digest<16>` (512-bit output)
+//!
+//! ## Hardware Backends
+//! - `HaceController`: ASPEED HACE hardware accelerator
 //! - `MockDigestDevice`: Software mock implementation for testing
-//! - Any hardware accelerator implementing `DigestInit` + `DigestCtrlReset` traits
-//!
-//! ## Usage with Custom Hardware
-//! 
-//! To use with a custom hardware device:
-//! ```rust
-//! let hardware = MyCustomDigestDevice::new();
-//! let server = ServerImpl::new(hardware);
-//! ```
-//!
-//! The hardware device must implement:
-//! - `DigestInit<Sha2_256>` - SHA-256 initialization
-//! - `DigestInit<Sha2_384>` - SHA-384 initialization  
-//! - `DigestInit<Sha2_512>` - SHA-512 initialization
-//! - `DigestCtrlReset` - Hardware reset capability
 
 use drv_digest_api::{DigestError};
-use idol_runtime::{Leased, LenLimit, RequestError, R, W};
+use idol_runtime::{ClientError, Leased, LenLimit, NotificationHandler, RequestError, R, W};
 use userlib::*;
+use heapless::FnvIndexMap;
+use zerocopy::IntoBytes;
 
 use openprot_hal_blocking::digest::{
-    DigestInit, DigestOp, DigestCtrlReset, ErrorType,
     Sha2_256, Sha2_384, Sha2_512, Digest
 };
-use openprot_platform_mock::hash::MockDigestDevice;
+use openprot_hal_blocking::digest::owned::{DigestInit, DigestOp};
 
-// Re-export the API that was generated from digest.idol.
-include!(concat!(env!("OUT_DIR"), "/server_stub.rs"));
-
-// Type alias for the default server implementation using MockDevice
-type DefaultServerImpl = ServerImpl<MockDigestDevice>;
-
-// Maximum number of concurrent digest sessions
-const MAX_SESSIONS: usize = 8;
-
-// Session timeout in ticks (adjust as needed)
-const SESSION_TIMEOUT_TICKS: u64 = 10_000;
-
-// Session buffer size - keep this reasonable
-const SESSION_BUFFER_SIZE: usize = 512;
-
-// Session states for different hash algorithms
-#[derive(Copy, Clone)]
-pub enum SessionAlgorithm {
-    Free,
+// Algorithm enum for session tracking
+#[derive(Debug, Clone, Copy)]
+pub enum DigestAlgorithm {
     Sha256,
     Sha384, 
     Sha512,
 }
 
-// Session data stored separately from the server struct
-#[derive(Copy, Clone)]
-pub struct SessionData {
-    algorithm: SessionAlgorithm,
-    buffer: [u8; SESSION_BUFFER_SIZE],
-    length: usize,
-    timeout: Option<u64>,
+// Hardware capabilities trait - determines session limits
+pub trait DigestHardwareCapabilities {
+    const MAX_CONCURRENT_SESSIONS: usize;
+    const SUPPORTS_HARDWARE_CONTEXT_SWITCHING: bool;
 }
 
-impl Default for SessionData {
-    fn default() -> Self {
-        Self {
-            algorithm: SessionAlgorithm::Free,
-            buffer: [0u8; SESSION_BUFFER_SIZE],
-            length: 0,
-            timeout: None,
-        }
-    }
+// ASPEED HACE Controller capabilities
+#[cfg(feature = "aspeed-hace")]
+impl DigestHardwareCapabilities for HaceController {
+    const MAX_CONCURRENT_SESSIONS: usize = 1;  // Single-context hardware
+    const SUPPORTS_HARDWARE_CONTEXT_SWITCHING: bool = false;
 }
 
-// Global session storage - allocated statically to avoid stack overflow
-static mut SESSION_STORAGE: [SessionData; MAX_SESSIONS] = [SessionData {
-    algorithm: SessionAlgorithm::Free,
-    buffer: [0u8; SESSION_BUFFER_SIZE],
-    length: 0,
-    timeout: None,
-}; MAX_SESSIONS];
+// Mock device capabilities (for testing)
+#[cfg(not(feature = "aspeed-hace"))]
+impl DigestHardwareCapabilities for MockDigestController {
+    const MAX_CONCURRENT_SESSIONS: usize = 8;  // Multiple contexts for testing
+    const SUPPORTS_HARDWARE_CONTEXT_SWITCHING: bool = true;
+}
 
-// Server implementation generic over any device that implements digest traits
+// Conditional imports based on features
+#[cfg(feature = "aspeed-hace")]
+use aspeed_ddk::hace::HaceController;
+
+#[cfg(not(feature = "aspeed-hace"))]
+use openprot_platform_mock::hash::owned::MockDigestController;
+
+// Re-export the API that was generated from digest.idol.
+mod idl {
+    use crate::DigestError;
+    include!(concat!(env!("OUT_DIR"), "/server_stub.rs"));
+}
+
+// Conditional type alias for the default digest device
+#[cfg(feature = "aspeed-hace")]
+type DefaultDigestDevice = HaceController;
+
+#[cfg(not(feature = "aspeed-hace"))]
+type DefaultDigestDevice = MockDigestController;
+
+// Maximum sessions across all hardware types - for embedded systems
+const MAX_SESSIONS: usize = 8;
+
+// Server implementation using hardware capabilities and owned API for sessions
 pub struct ServerImpl<D> 
+where
+    D: DigestInit<Sha2_256, Output = Digest<8>> 
+     + DigestInit<Sha2_384, Output = Digest<12>>
+     + DigestInit<Sha2_512, Output = Digest<16>>
+     + DigestHardwareCapabilities,
+{
+    controllers: Controllers<D>,
+    sessions: FnvIndexMap<u32, DigestSession<D>, MAX_SESSIONS>,
+    next_session_id: u32,
+}
+
+// Controllers available for creating new contexts
+struct Controllers<D> {
+    hardware: Option<D>,  // Single hardware controller, None when in use
+}
+
+// Active digest session with owned context
+struct DigestSession<D> 
+where 
+    D: DigestInit<Sha2_256, Output = Digest<8>> 
+     + DigestInit<Sha2_384, Output = Digest<12>>
+     + DigestInit<Sha2_512, Output = Digest<16>>
+     + DigestHardwareCapabilities,
+{
+    algorithm: DigestAlgorithm,
+    context: SessionContext<D>,
+    created_at: u64, // Timestamp for timeout
+}
+
+// Owned context storage with Option wrappers for move semantics
+// Option wrappers needed because update(self) and finalize(self) consume contexts
+enum SessionContext<D>
+where 
+    D: DigestInit<Sha2_256, Output = Digest<8>> 
+     + DigestInit<Sha2_384, Output = Digest<12>>
+     + DigestInit<Sha2_512, Output = Digest<16>>
+     + DigestHardwareCapabilities,
+{
+    Sha256(Option<<D as DigestInit<Sha2_256>>::Context>),
+    Sha384(Option<<D as DigestInit<Sha2_384>>::Context>), 
+    Sha512(Option<<D as DigestInit<Sha2_512>>::Context>),
+}
+
+// Implement NotificationHandler (required by InOrderDigestImpl)
+impl<D> idol_runtime::NotificationHandler for ServerImpl<D> 
 where
     D: DigestInit<Sha2_256, Output = Digest<8>> 
      + DigestInit<Sha2_384, Output = Digest<12>> 
      + DigestInit<Sha2_512, Output = Digest<16>> 
-     + DigestCtrlReset,
+     + DigestHardwareCapabilities,
 {
-    hardware: D,
+    fn current_notification_mask(&self) -> u32 {
+        0 // No notifications handled
+    }
+    
+    fn handle_notification(&mut self, _bits: u32) {
+        // No notifications to handle
+    }
 }
 
 impl<D> ServerImpl<D> 
@@ -103,161 +150,245 @@ where
     D: DigestInit<Sha2_256, Output = Digest<8>> 
      + DigestInit<Sha2_384, Output = Digest<12>> 
      + DigestInit<Sha2_512, Output = Digest<16>> 
-     + DigestCtrlReset,
+     + DigestHardwareCapabilities,
 {
     pub fn new(hardware: D) -> Self {
-        Self {
-            hardware,
+        Self { 
+            controllers: Controllers { hardware: Some(hardware) },
+            sessions: FnvIndexMap::new(),
+            next_session_id: 1,
         }
-    }
-
-    fn find_free_session(&self) -> Result<usize, DigestError> {
-        unsafe {
-            for (index, session) in SESSION_STORAGE.iter().enumerate() {
-                if matches!(session.algorithm, SessionAlgorithm::Free) {
-                    return Ok(index);
-                }
-            }
-        }
-        Err(DigestError::TooManySessions)
-    }
-
-    fn validate_session(&self, session_id: u32) -> Result<usize, DigestError> {
-        let index = session_id as usize;
-        if index >= MAX_SESSIONS {
-            return Err(DigestError::InvalidSession);
-        }
-        
-        unsafe {
-            if matches!(SESSION_STORAGE[index].algorithm, SessionAlgorithm::Free) {
-                return Err(DigestError::InvalidSession);
-            }
-        }
-        
-        Ok(index)
-    }
-
-    fn cleanup_expired_sessions(&mut self) {
-        let current_time = sys_get_timer().now;
-        
-        unsafe {
-            for session in SESSION_STORAGE.iter_mut() {
-                if let Some(timeout_time) = session.timeout {
-                    if current_time > timeout_time {
-                        session.algorithm = SessionAlgorithm::Free;
-                        session.length = 0;
-                        session.timeout = None;
-                    }
-                }
-            }
-        }
-    }
-
-    fn update_session_timeout(&mut self, index: usize) {
-        unsafe {
-            SESSION_STORAGE[index].timeout = Some(sys_get_timer().now + SESSION_TIMEOUT_TICKS);
-        }
-    }
-
-    // Static dispatch methods - no runtime algorithm selection
-    fn compute_sha256_hash(&mut self, data: &[u8]) -> Result<Digest<8>, DigestError> {
-        let mut ctx = self.hardware.init(Sha2_256).map_err(|_| DigestError::HardwareFailure)?;
-        ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
-        ctx.finalize().map_err(|_| DigestError::HardwareFailure)
     }
     
-    fn compute_sha384_hash(&mut self, data: &[u8]) -> Result<Digest<12>, DigestError> {
-        let mut ctx = self.hardware.init(Sha2_384).map_err(|_| DigestError::HardwareFailure)?;
-        ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
-        ctx.finalize().map_err(|_| DigestError::HardwareFailure)
+    // Session-based operations using owned API
+    fn init_sha256(&mut self) -> Result<u32, DigestError> {
+        // Check if we've reached the hardware session limit
+        if self.sessions.len() >= D::MAX_CONCURRENT_SESSIONS {
+            return Err(DigestError::TooManySessions);
+        }
+        
+        let controller = self.controllers.hardware.take()
+            .ok_or(DigestError::TooManySessions)?;
+        
+        let context = controller.init(Sha2_256)
+            .map_err(|_| DigestError::HardwareFailure)?;
+        
+        let session_id = self.next_session_id;
+        self.next_session_id = self.next_session_id.wrapping_add(1);
+        
+        let session = DigestSession {
+            algorithm: DigestAlgorithm::Sha256,
+            context: SessionContext::Sha256(Some(context)),
+            created_at: sys_get_timer().now,
+        };
+        
+        self.sessions.insert(session_id, session).map_err(|_| DigestError::TooManySessions)?;
+        Ok(session_id)
     }
     
-    fn compute_sha512_hash(&mut self, data: &[u8]) -> Result<Digest<16>, DigestError> {
-        let mut ctx = self.hardware.init(Sha2_512).map_err(|_| DigestError::HardwareFailure)?;
-        ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
-        ctx.finalize().map_err(|_| DigestError::HardwareFailure)
+    fn init_sha384(&mut self) -> Result<u32, DigestError> {
+        // Check if we've reached the hardware session limit
+        if self.sessions.len() >= D::MAX_CONCURRENT_SESSIONS {
+            return Err(DigestError::TooManySessions);
+        }
+        
+        let controller = self.controllers.hardware.take()
+            .ok_or(DigestError::TooManySessions)?;
+        
+        let context = controller.init(Sha2_384)
+            .map_err(|_| DigestError::HardwareFailure)?;
+        
+        let session_id = self.next_session_id;
+        self.next_session_id = self.next_session_id.wrapping_add(1);
+        
+        let session = DigestSession {
+            algorithm: DigestAlgorithm::Sha384,
+            context: SessionContext::Sha384(Some(context)),
+            created_at: sys_get_timer().now,
+        };
+        
+        self.sessions.insert(session_id, session).map_err(|_| DigestError::TooManySessions)?;
+        Ok(session_id)
+    }
+    
+    fn init_sha512(&mut self) -> Result<u32, DigestError> {
+        // Check if we've reached the hardware session limit
+        if self.sessions.len() >= D::MAX_CONCURRENT_SESSIONS {
+            return Err(DigestError::TooManySessions);
+        }
+        
+        let controller = self.controllers.hardware.take()
+            .ok_or(DigestError::TooManySessions)?;
+        
+        let context = controller.init(Sha2_512)
+            .map_err(|_| DigestError::HardwareFailure)?;
+        
+        let session_id = self.next_session_id;
+        self.next_session_id = self.next_session_id.wrapping_add(1);
+        
+        let session = DigestSession {
+            algorithm: DigestAlgorithm::Sha512,
+            context: SessionContext::Sha512(Some(context)),
+            created_at: sys_get_timer().now,
+        };
+        
+        self.sessions.insert(session_id, session).map_err(|_| DigestError::TooManySessions)?;
+        Ok(session_id)
+    }
+    
+    fn update(&mut self, session_id: u32, data: &[u8]) -> Result<(), DigestError> {
+        let session = self.sessions.get_mut(&session_id)
+            .ok_or(DigestError::InvalidSession)?;
+        
+        match &mut session.context {
+            SessionContext::Sha256(ctx_opt) => {
+                // Clean move using Option::take()
+                let old_ctx = ctx_opt.take().ok_or(DigestError::InvalidSession)?;
+                let new_ctx = old_ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
+                *ctx_opt = Some(new_ctx);
+            }
+            SessionContext::Sha384(ctx_opt) => {
+                let old_ctx = ctx_opt.take().ok_or(DigestError::InvalidSession)?;
+                let new_ctx = old_ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
+                *ctx_opt = Some(new_ctx);
+            }
+            SessionContext::Sha512(ctx_opt) => {
+                let old_ctx = ctx_opt.take().ok_or(DigestError::InvalidSession)?;
+                let new_ctx = old_ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
+                *ctx_opt = Some(new_ctx);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn finalize_sha256_internal(&mut self, session_id: u32) -> Result<[u32; 8], DigestError> {
+        let mut session = self.sessions.remove(&session_id)
+            .ok_or(DigestError::InvalidSession)?;
+        
+        match &mut session.context {
+            SessionContext::Sha256(ctx_opt) => {
+                let ctx = ctx_opt.take().ok_or(DigestError::InvalidSession)?;
+                let (digest, controller) = ctx.finalize()
+                    .map_err(|_| DigestError::HardwareFailure)?;
+                
+                // Return controller to available pool
+                self.controllers.hardware = Some(controller);
+                
+                // Direct safe conversion with concrete Digest<8> type - no unsafe code needed!
+                Ok(digest.into_array())
+            }
+            _ => Err(DigestError::UnsupportedAlgorithm),
+        }
+    }
+    
+    fn finalize_sha384_internal(&mut self, session_id: u32) -> Result<[u32; 12], DigestError> {
+        let mut session = self.sessions.remove(&session_id)
+            .ok_or(DigestError::InvalidSession)?;
+        
+        match &mut session.context {
+            SessionContext::Sha384(ctx_opt) => {
+                let ctx = ctx_opt.take().ok_or(DigestError::InvalidSession)?;
+                let (digest, controller) = ctx.finalize()
+                    .map_err(|_| DigestError::HardwareFailure)?;
+                
+                // Return controller to available pool
+                self.controllers.hardware = Some(controller);
+                
+                // Direct safe conversion with concrete Digest<12> type - no unsafe code needed!
+                Ok(digest.into_array())
+            }
+            _ => Err(DigestError::UnsupportedAlgorithm),
+        }
+    }
+    
+    fn finalize_sha512_internal(&mut self, session_id: u32) -> Result<[u32; 16], DigestError> {
+        let mut session = self.sessions.remove(&session_id)
+            .ok_or(DigestError::InvalidSession)?;
+        
+        match &mut session.context {
+            SessionContext::Sha512(ctx_opt) => {
+                let ctx = ctx_opt.take().ok_or(DigestError::InvalidSession)?;
+                let (digest, controller) = ctx.finalize()
+                    .map_err(|_| DigestError::HardwareFailure)?;
+                
+                // Return controller to available pool
+                self.controllers.hardware = Some(controller);
+                
+                // Direct safe conversion - no unsafe code needed!
+                Ok(digest.into_array())
+            }
+            _ => Err(DigestError::UnsupportedAlgorithm),
+        }
+    }
+    
+    // One-shot SHA-384 hash - uses traits correctly
+    fn compute_sha384_oneshot(&mut self, data: &[u8]) -> Result<Digest<12>, DigestError> {
+        // Need to temporarily take hardware controller
+        let mut controller = self.controllers.hardware.take()
+            .ok_or(DigestError::HardwareFailure)?;
+        let mut ctx = controller.init(Sha2_384).map_err(|_| DigestError::HardwareFailure)?;
+        let ctx = ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
+        let (result, controller_back) = ctx.finalize().map_err(|_| DigestError::HardwareFailure)?;
+        self.controllers.hardware = Some(controller_back);
+        Ok(result)
+    }
+    
+    // One-shot SHA-512 hash - uses traits correctly
+    fn compute_sha512_oneshot(&mut self, data: &[u8]) -> Result<Digest<16>, DigestError> {
+        // Need to temporarily take hardware controller
+        let mut controller = self.controllers.hardware.take()
+            .ok_or(DigestError::HardwareFailure)?;
+        let mut ctx = controller.init(Sha2_512).map_err(|_| DigestError::HardwareFailure)?;
+        let ctx = ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
+        let (result, controller_back) = ctx.finalize().map_err(|_| DigestError::HardwareFailure)?;
+        self.controllers.hardware = Some(controller_back);
+        Ok(result)
+    }
+    
+    // One-shot SHA-256 hash - uses traits correctly
+    fn compute_sha256_oneshot(&mut self, data: &[u8]) -> Result<Digest<8>, DigestError> {
+        // Need to temporarily take hardware controller
+        let mut controller = self.controllers.hardware.take()
+            .ok_or(DigestError::HardwareFailure)?;
+        let mut ctx = controller.init(Sha2_256).map_err(|_| DigestError::HardwareFailure)?;
+        let ctx = ctx.update(data).map_err(|_| DigestError::HardwareFailure)?;
+        let (result, controller_back) = ctx.finalize().map_err(|_| DigestError::HardwareFailure)?;
+        self.controllers.hardware = Some(controller_back);
+        Ok(result)
     }
 }
 
-impl<D> InOrderDigestImpl for ServerImpl<D> 
+// Implementation of the digest API - session-based operations using owned API
+impl<D> idl::InOrderDigestImpl for ServerImpl<D> 
 where
     D: DigestInit<Sha2_256, Output = Digest<8>> 
      + DigestInit<Sha2_384, Output = Digest<12>> 
      + DigestInit<Sha2_512, Output = Digest<16>> 
-     + DigestCtrlReset,
+     + DigestHardwareCapabilities,
 {
-    fn init_sha256(
-        &mut self,
-        _msg: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        self.cleanup_expired_sessions();
-        
-        let index = self.find_free_session().map_err(RequestError::Runtime)?;
-        
-        unsafe {
-            SESSION_STORAGE[index].algorithm = SessionAlgorithm::Sha256;
-            SESSION_STORAGE[index].length = 0;
-        }
-        self.update_session_timeout(index);
-        
-        Ok(index as u32)
+    // Session-based operations using owned API - fully supported
+    fn init_sha256(&mut self, _msg: &RecvMessage) -> Result<u32, RequestError<DigestError>> {
+        self.init_sha256().map_err(RequestError::Runtime)
     }
 
-    fn init_sha384(
-        &mut self,
-        _msg: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        self.cleanup_expired_sessions();
-        
-        let index = self.find_free_session().map_err(RequestError::Runtime)?;
-        
-        unsafe {
-            SESSION_STORAGE[index].algorithm = SessionAlgorithm::Sha384;
-            SESSION_STORAGE[index].length = 0;
-        }
-        self.update_session_timeout(index);
-        
-        Ok(index as u32)
+    fn init_sha384(&mut self, _msg: &RecvMessage) -> Result<u32, RequestError<DigestError>> {
+        self.init_sha384().map_err(RequestError::Runtime)
     }
 
-    fn init_sha512(
-        &mut self,
-        _msg: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        self.cleanup_expired_sessions();
-        
-        let index = self.find_free_session().map_err(RequestError::Runtime)?;
-        
-        unsafe {
-            SESSION_STORAGE[index].algorithm = SessionAlgorithm::Sha512;
-            SESSION_STORAGE[index].length = 0;
-        }
-        self.update_session_timeout(index);
-        
-        Ok(index as u32)
+    fn init_sha512(&mut self, _msg: &RecvMessage) -> Result<u32, RequestError<DigestError>> {
+        self.init_sha512().map_err(RequestError::Runtime)
     }
 
-    fn init_sha3_256(
-        &mut self,
-        _msg: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        // SHA-3 not supported by MockDigestDevice
+    fn init_sha3_256(&mut self, _msg: &RecvMessage) -> Result<u32, RequestError<DigestError>> {
         Err(RequestError::Runtime(DigestError::UnsupportedAlgorithm))
     }
 
-    fn init_sha3_384(
-        &mut self,
-        _msg: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        // SHA-3 not supported by MockDigestDevice
+    fn init_sha3_384(&mut self, _msg: &RecvMessage) -> Result<u32, RequestError<DigestError>> {
         Err(RequestError::Runtime(DigestError::UnsupportedAlgorithm))
     }
 
-    fn init_sha3_512(
-        &mut self,
-        _msg: &RecvMessage,
-    ) -> Result<u32, RequestError<DigestError>> {
-        // SHA-3 not supported by MockDigestDevice
+    fn init_sha3_512(&mut self, _msg: &RecvMessage) -> Result<u32, RequestError<DigestError>> {
         Err(RequestError::Runtime(DigestError::UnsupportedAlgorithm))
     }
 
@@ -268,31 +399,11 @@ where
         len: u32,
         data: LenLimit<Leased<R, [u8]>, 1024>,
     ) -> Result<(), RequestError<DigestError>> {
-        let index = self.validate_session(session_id).map_err(RequestError::Runtime)?;
-        self.update_session_timeout(index);
-        
-        let len = len as usize;
-        if len > data.len() || len > 1024 {
-            return Err(RequestError::Runtime(DigestError::InvalidInputLength));
-        }
-        
-        // Read data into a temporary buffer
         let mut buffer = [0u8; 1024];
-        data.read_range(0..len, &mut buffer[..len])
-            .map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
-            
-        // Append to session data
-        unsafe {
-            let session = &mut SESSION_STORAGE[index];
-            if session.length + len > SESSION_BUFFER_SIZE {
-                return Err(RequestError::Runtime(DigestError::MemoryAllocationFailure));
-            }
-            
-            session.buffer[session.length..session.length + len].copy_from_slice(&buffer[..len]);
-            session.length += len;
-        }
-        
-        Ok(())
+        data.read_range(0..len as usize, &mut buffer)
+            .map_err(|_| RequestError::Runtime(DigestError::HardwareFailure))?;
+        let data_slice = &buffer[0..len as usize];
+        self.update(session_id, data_slice).map_err(RequestError::Runtime)
     }
 
     fn finalize_sha256(
@@ -301,29 +412,8 @@ where
         session_id: u32,
         digest: Leased<W, [u32; 8]>,
     ) -> Result<(), RequestError<DigestError>> {
-        let index = self.validate_session(session_id).map_err(RequestError::Runtime)?;
-        
-        let (session_data, data_len) = unsafe {
-            let session = &mut SESSION_STORAGE[index];
-            if !matches!(session.algorithm, SessionAlgorithm::Sha256) {
-                return Err(RequestError::Runtime(DigestError::InvalidSession));
-            }
-            
-            // Get a copy of the data and reset the session
-            let mut data = [0u8; SESSION_BUFFER_SIZE];
-            let len = session.length;
-            data[..len].copy_from_slice(&session.buffer[..len]);
-            
-            session.algorithm = SessionAlgorithm::Free;
-            session.length = 0;
-            session.timeout = None;
-            
-            (data, len)
-        };
-        
-        let hash_result = self.compute_sha256_hash(&session_data[..data_len]).map_err(RequestError::Runtime)?;
-        
-        digest.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+        let result = self.finalize_sha256_internal(session_id).map_err(RequestError::Runtime)?;
+        digest.write(result).map_err(|_| RequestError::Fail(ClientError::WentAway))?;
         Ok(())
     }
 
@@ -333,29 +423,8 @@ where
         session_id: u32,
         digest: Leased<W, [u32; 12]>,
     ) -> Result<(), RequestError<DigestError>> {
-        let index = self.validate_session(session_id).map_err(RequestError::Runtime)?;
-        
-        let (session_data, data_len) = unsafe {
-            let session = &mut SESSION_STORAGE[index];
-            if !matches!(session.algorithm, SessionAlgorithm::Sha384) {
-                return Err(RequestError::Runtime(DigestError::InvalidSession));
-            }
-            
-            // Get a copy of the data and reset the session
-            let mut data = [0u8; SESSION_BUFFER_SIZE];
-            let len = session.length;
-            data[..len].copy_from_slice(&session.buffer[..len]);
-            
-            session.algorithm = SessionAlgorithm::Free;
-            session.length = 0;
-            session.timeout = None;
-            
-            (data, len)
-        };
-        
-        let hash_result = self.compute_sha384_hash(&session_data[..data_len]).map_err(RequestError::Runtime)?;
-        
-        digest.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+        let result = self.finalize_sha384_internal(session_id).map_err(RequestError::Runtime)?;
+        digest.write(result).map_err(|_| RequestError::Fail(ClientError::WentAway))?;
         Ok(())
     }
 
@@ -365,29 +434,8 @@ where
         session_id: u32,
         digest: Leased<W, [u32; 16]>,
     ) -> Result<(), RequestError<DigestError>> {
-        let index = self.validate_session(session_id).map_err(RequestError::Runtime)?;
-        
-        let (session_data, data_len) = unsafe {
-            let session = &mut SESSION_STORAGE[index];
-            if !matches!(session.algorithm, SessionAlgorithm::Sha512) {
-                return Err(RequestError::Runtime(DigestError::InvalidSession));
-            }
-            
-            // Get a copy of the data and reset the session
-            let mut data = [0u8; SESSION_BUFFER_SIZE];
-            let len = session.length;
-            data[..len].copy_from_slice(&session.buffer[..len]);
-            
-            session.algorithm = SessionAlgorithm::Free;
-            session.length = 0;
-            session.timeout = None;
-            
-            (data, len)
-        };
-        
-        let hash_result = self.compute_sha512_hash(&session_data[..data_len]).map_err(RequestError::Runtime)?;
-        
-        digest.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+        let result = self.finalize_sha512_internal(session_id).map_err(RequestError::Runtime)?;
+        digest.write(result).map_err(|_| RequestError::Fail(ClientError::WentAway))?;
         Ok(())
     }
 
@@ -421,20 +469,12 @@ where
     fn reset(
         &mut self,
         _msg: &RecvMessage,
-        session_id: u32,
+        _session_id: u32,
     ) -> Result<(), RequestError<DigestError>> {
-        let index = self.validate_session(session_id).map_err(RequestError::Runtime)?;
-        
-        unsafe {
-            SESSION_STORAGE[index].algorithm = SessionAlgorithm::Free;
-            SESSION_STORAGE[index].length = 0;
-            SESSION_STORAGE[index].timeout = None;
-        }
-        
-        Ok(())
+        Err(RequestError::Runtime(DigestError::UnsupportedAlgorithm))
     }
 
-    // One-shot digest operations
+    // ✅ ONE-SHOT OPERATIONS - These work correctly with the traits
     fn digest_oneshot_sha256(
         &mut self,
         _msg: &RecvMessage,
@@ -446,14 +486,22 @@ where
         if len > data.len() || len > 1024 {
             return Err(RequestError::Runtime(DigestError::InvalidInputLength));
         }
-        
+
+        // Read input data into buffer
         let mut buffer = [0u8; 1024];
         data.read_range(0..len, &mut buffer[..len])
             .map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
-            
-        let hash_result = self.compute_sha256_hash(&buffer[..len]).map_err(RequestError::Runtime)?;
+
+        // Compute hash using traits correctly
+        let hash_result = self.compute_sha256_oneshot(&buffer[..len])
+            .map_err(RequestError::Runtime)?;
+
+        // Direct safe conversion with concrete Digest<8> type - no unsafe code needed!
+        let result = hash_result.into_array();
         
-        digest_out.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+        digest_out.write(result)
+            .map_err(|_| RequestError::Runtime(DigestError::HardwareFailure))?;
+
         Ok(())
     }
 
@@ -468,14 +516,22 @@ where
         if len > data.len() || len > 1024 {
             return Err(RequestError::Runtime(DigestError::InvalidInputLength));
         }
-        
+
+        // Read input data into buffer
         let mut buffer = [0u8; 1024];
         data.read_range(0..len, &mut buffer[..len])
             .map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
-            
-        let hash_result = self.compute_sha384_hash(&buffer[..len]).map_err(RequestError::Runtime)?;
+
+        // Compute hash using traits correctly
+        let hash_result = self.compute_sha384_oneshot(&buffer[..len])
+            .map_err(RequestError::Runtime)?;
+
+        // Direct safe conversion with concrete Digest<12> type - no unsafe code needed!
+        let result = hash_result.into_array();
         
-        digest_out.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+        digest_out.write(result)
+            .map_err(|_| RequestError::Runtime(DigestError::HardwareFailure))?;
+
         Ok(())
     }
 
@@ -490,49 +546,56 @@ where
         if len > data.len() || len > 1024 {
             return Err(RequestError::Runtime(DigestError::InvalidInputLength));
         }
-        
+
+        // Read input data into buffer
         let mut buffer = [0u8; 1024];
         data.read_range(0..len, &mut buffer[..len])
             .map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
-            
-        let hash_result = self.compute_sha512_hash(&buffer[..len]).map_err(RequestError::Runtime)?;
+
+        // Compute hash using traits correctly
+        let hash_result = self.compute_sha512_oneshot(&buffer[..len])
+            .map_err(RequestError::Runtime)?;
+
+        // Direct safe conversion with concrete Digest<16> type - no unsafe code needed!
+        let result = hash_result.into_array();
         
-        digest_out.write(hash_result.value).map_err(|_| RequestError::Runtime(DigestError::InvalidInputLength))?;
+        digest_out.write(result)
+            .map_err(|_| RequestError::Runtime(DigestError::HardwareFailure))?;
+
         Ok(())
     }
 }
 
-impl<D> idol_runtime::NotificationHandler for ServerImpl<D> 
+// Type alias for the default server implementation
+type DefaultServerImpl = ServerImpl<DefaultDigestDevice>;
+
+// Server instantiation and task entry point
+impl<D> ServerImpl<D>
 where
     D: DigestInit<Sha2_256, Output = Digest<8>> 
-     + DigestInit<Sha2_384, Output = Digest<12>> 
-     + DigestInit<Sha2_512, Output = Digest<16>> 
-     + DigestCtrlReset,
+     + DigestInit<Sha2_384, Output = Digest<12>>
+     + DigestInit<Sha2_512, Output = Digest<16>>
+     + DigestHardwareCapabilities,
 {
-    fn current_notification_mask(&self) -> u32 {
-        // We don't use notifications in this implementation
-        0
-    }
-
-    fn handle_notification(&mut self, _bits: u32) {
-        // No notifications to handle
-    }
+    // Hardware reset functionality removed for compatibility
 }
 
-#[export_name = "main"]
-fn main() -> ! {
-    // Initialize the server with a MockDevice
-    let hardware = MockDigestDevice::new();
-    let mut server = ServerImpl::new(hardware);
-    let mut buffer = [0u8; idl::INCOMING_SIZE];
+#[no_mangle]
+pub extern "C" fn main() -> ! {
+    // Initialize hardware device
+    #[cfg(feature = "aspeed-hace")]
+    let hardware = HaceController::new();
     
-    // Run the server using the standard dispatch pattern
-    loop {
-        idol_runtime::dispatch(&mut buffer, &mut server);
-    }
-}
+    #[cfg(not(feature = "aspeed-hace"))]
+    let hardware = MockDigestController::new();
 
-mod idl {
-    use drv_digest_api::DigestError;
-    include!(concat!(env!("OUT_DIR"), "/server_stub.rs"));
+    let mut server = ServerImpl::new(hardware);
+    
+    // Hardware reset functionality removed for compatibility
+
+    // Enter the main IPC loop
+    let mut incoming = [0u8; idl::INCOMING_SIZE];
+    loop {
+        idol_runtime::dispatch(&mut incoming, &mut server);
+    }
 }

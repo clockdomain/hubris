@@ -48,7 +48,7 @@ path = "lib/counters"
 anyhow = { version = "1.0.31", default-features = false, features = ["std"] }
 array-init = { version = "2.1.0" }
 arrayvec = { version = "0.7.4", default-features = false }
-aspeed-ddk = { git = "https://github.com/aspeedtech-bmc/aspeed-rust.git" }
+aspeed-ddk = { git = "https://github.com/rusty1968/aspeed-rust.git" , branch = "refactor-hace" }
 ast1060-pac = { git = "https://github.com/aspeedtech-bmc/ast1060-pac.git" }
 atty = { version = "0.2", default-features = false }
 bitfield = { version = "0.13", default-features = false }
@@ -163,8 +163,8 @@ transceiver-messages = { git = "https://github.com/oxidecomputer/transceiver-con
 vsc7448-pac = { git = "https://github.com/oxidecomputer/vsc7448", default-features = false }
 
 ## OpenPRot Initiative
-openprot-hal-blocking = { git = "https://github.com/OpenPRoT/openprot" , branch = "driver-model-doc" }
-openprot-platform-mock = { git = "https://github.com/OpenPRoT/openprot" , branch = "driver-model-doc" }
+openprot-hal-blocking = { git = "https://github.com/rusty1968/openprot" , branch = "driver-model-doc" }
+openprot-platform-mock = { git = "https://github.com/rusty1968/openprot" , branch = "driver-model-doc" }
 [workspace.lints.rust]
 elided_lifetimes_in_paths = "warn"
 
