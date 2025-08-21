@@ -15,22 +15,22 @@ use mctp::{Eid, Listener, MsgType, RespChannel};
 use mctp_api::{MctpListener, Stack};
 use userlib::*;
 
-task_slot!(MCTP, mctp);
+task_slot!(MCTP, mctp_server);
 
 #[export_name = "main"]
 fn main() -> ! {
-    let stack = mctp_api::Stack::from(mctp);
+    let stack = mctp_api::Stack::from(MCTP.get_task_id());
 
     stack.set_eid(Eid(8)).unwrap_lite();
-    let listener = stack.listener(MsgType(1)).unwrap_lite();
+    let mut listener = stack.listener(MsgType(1)).unwrap_lite();
     let mut recv_buf = [0; 255];
 
     loop {
-        let (_, _, msg, resp) = listener.recv(&mut recv_buf).unwrap_lite();
+        let (_, _, msg, mut resp) = listener.recv(&mut recv_buf).unwrap_lite();
 
-        match resp.send(buf) {
+        match resp.send(msg) {
             Ok(_) => {}
-            Err(e) => {
+            Err(_e) => {
                 // Error sending response to peer
             }
         }
