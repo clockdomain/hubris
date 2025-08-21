@@ -80,8 +80,13 @@ type DefaultDigestDevice = HaceController;
 #[cfg(not(feature = "aspeed-hace"))]
 type DefaultDigestDevice = MockDigestController;
 
-// Maximum sessions across all hardware types - for embedded systems
-const MAX_SESSIONS: usize = 8;
+// Maximum sessions based on hardware capabilities
+const fn max_sessions_for_platform() -> usize {
+    // Use the actual hardware device's capabilities
+    DefaultDigestDevice::MAX_CONCURRENT_SESSIONS
+}
+
+const MAX_SESSIONS: usize = max_sessions_for_platform();
 
 // Server implementation using hardware capabilities and owned API for sessions
 pub struct ServerImpl<D> 

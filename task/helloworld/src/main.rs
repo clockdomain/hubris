@@ -51,26 +51,19 @@ fn run_digest_test_suite() {
     // Test 2: One-shot operations
     test_oneshot_operations();
     
-    #[cfg(feature = "session-based-digest")]
-    {
-        // Test 3: Session-based operations  
-        test_session_operations();
-        
-        // Test 4: Multiple concurrent sessions
-        test_multiple_sessions();
-        
-        // Test 5: Error conditions (session-specific)
-        test_error_conditions();
-    }
+    // Test 3: Session-based operations  
+    test_session_operations();
     
-    #[cfg(not(feature = "session-based-digest"))]
-    {
-        // Test 3: One-shot error conditions
-        test_oneshot_error_conditions();
-    }
+    // Test 4: Multiple concurrent sessions
+    test_multiple_sessions();
     
-    // Test 6: Performance test
-    test_performance();
+    // Test 5: Error conditions (session-specific)
+    test_error_conditions();
+    
+    // Test 6: One-shot error conditions
+    test_oneshot_error_conditions();
+    
+    // Performance testing removed to avoid controller conflicts
 }
 
 fn test_server_connectivity() {
@@ -181,36 +174,55 @@ fn test_oneshot_sha512_known_vector() {
     }
 }
 
-#[cfg(feature = "session-based-digest")]
 fn test_session_operations() {
-    uart_send(b"
-[TEST 3] Session-based Operations
-");
+    uart_send(b"\r\n[TEST 3] Session Operations\r\n");
     
-    #[cfg(feature = "session-based-digest")]
-    {
-        match test_session_based_digest() {
-            Ok(result) => {
-                uart_send(b"  [OK] Session-based SHA-256 successful
-");
-                uart_send(b"    Result: ");
-                print_hash(&result);
-                uart_send(b"
-");
-            }
-            Err(e) => {
-                uart_send(b"  [FAIL] Session-based operation failed: ");
-                print_error(e);
-                uart_send(b"
-");
-            }
+    // Test streaming SHA-256
+    match test_session_based_digest() {
+        Ok(result) => {
+            uart_send(b"  [OK] SHA-256 stream\r\n");
+            uart_send(b"    ");
+            print_hash(&result);
+            uart_send(b"\r\n");
+        }
+        Err(e) => {
+            uart_send(b"  [FAIL] SHA-256 stream: ");
+            print_error(e);
+            uart_send(b"\r\n");
         }
     }
-}
-
-#[cfg(feature = "session-based-digest")]
-fn test_multiple_sessions() {
-    uart_send(b"\r\n[TEST 4] Multiple Concurrent Sessions\r\n");
+    
+    // Test streaming SHA-384
+    match test_session_based_sha384() {
+        Ok(result) => {
+            uart_send(b"  [OK] SHA-384 stream\r\n");
+            uart_send(b"    ");
+            print_hash(&result[..8]);
+            uart_send(b"...\r\n");
+        }
+        Err(e) => {
+            uart_send(b"  [FAIL] SHA-384 stream: ");
+            print_error(e);
+            uart_send(b"\r\n");
+        }
+    }
+    
+    // Test streaming SHA-512
+    match test_session_based_sha512() {
+        Ok(result) => {
+            uart_send(b"  [OK] SHA-512 stream\r\n");
+            uart_send(b"    ");
+            print_hash(&result[..8]);
+            uart_send(b"...\r\n");
+        }
+        Err(e) => {
+            uart_send(b"  [FAIL] SHA-512 stream: ");
+            print_error(e);
+            uart_send(b"\r\n");
+        }
+    }
+}fn test_multiple_sessions() {
+    uart_send(b"\r\n[TEST 4] Multiple Sessions\r\n");
     
     let digest = Digest::from(DIGEST.get_task_id());
     
@@ -268,9 +280,8 @@ fn test_multiple_sessions() {
     }
 }
 
-#[cfg(feature = "session-based-digest")]
 fn test_error_conditions() {
-    uart_send(b"\r\n[TEST 5] Error Condition Testing\r\n");
+    uart_send(b"\r\n[TEST 5] Error Conditions\r\n");
     
     let digest = Digest::from(DIGEST.get_task_id());
     
@@ -320,7 +331,6 @@ fn test_error_conditions() {
     }
 }
 
-#[cfg(not(feature = "session-based-digest"))]
 fn test_oneshot_error_conditions() {
     uart_send(b"\r\n[TEST 3] One-shot Error Condition Testing\r\n");
     
@@ -363,40 +373,8 @@ fn test_oneshot_error_conditions() {
     }
 }
 
-fn test_performance() {
-    uart_send(b"\r\n[TEST 6] Performance Testing\r\n");
-    
-    let digest = Digest::from(DIGEST.get_task_id());
-    
-    // Test with different data sizes
-    let sizes = [16, 64, 256, 512];
-    
-    for &size in &sizes {
-        uart_send(b"  Testing with ");
-        print_number(size);
-        uart_send(b" bytes...\r\n");
-        
-        // Create test data
-        let mut test_data = [0u8; 512];
-        for i in 0..size.min(512) {
-            test_data[i as usize] = (i % 256) as u8;
-        }
-        
-        let mut result = [0u32; 8];
-        match digest.digest_oneshot_sha256(size, &test_data[..size.min(512) as usize], &mut result) {
-            Ok(_) => {
-                uart_send(b"    [OK] ");
-                print_number(size);
-                uart_send(b" bytes processed successfully\r\n");
-            }
-            Err(e) => {
-                uart_send(b"    [FAIL] Failed: ");
-                print_error(e);
-                uart_send(b"\r\n");
-            }
-        }
-    }
-}
+// Performance testing removed to avoid hardware controller conflicts
+// and reduce flash memory usage
 
 fn test_digest_server() {
     let digest = Digest::from(DIGEST.get_task_id());
@@ -419,25 +397,7 @@ fn test_digest_server() {
         }
     }
     
-    // Test session-based SHA-256
-    #[cfg(feature = "session-based-digest")]
-    {
-        uart_send(b"Testing session-based SHA-256...\r\n");
-        match test_session_based_digest() {
-            Ok(hash) => {
-                uart_send(b"Session SHA-256 result: ");
-                print_hash(&hash[..8]);
-                uart_send(b"\r\n");
-            }
-            Err(e) => {
-                uart_send(b"Session error: ");
-                print_error(e);
-                uart_send(b"\r\n");
-            }
-        }
-    }
-    
-    // Test SHA-384
+    // Test SHA-384 (one-shot only)
     uart_send(b"Testing SHA-384...\r\n");
     let mut result384 = [0u32; 12];
     match digest.digest_oneshot_sha384(test_data.len() as u32, test_data, &mut result384) {
@@ -453,7 +413,7 @@ fn test_digest_server() {
         }
     }
     
-    // Test SHA-512
+    // Test SHA-512 (one-shot only)
     uart_send(b"Testing SHA-512...\r\n");
     let mut result512 = [0u32; 16];
     match digest.digest_oneshot_sha512(test_data.len() as u32, test_data, &mut result512) {
@@ -469,27 +429,71 @@ fn test_digest_server() {
         }
     }
     
-    uart_send(b"Digest server testing complete!\r\n");
+    uart_send(b"One-shot digest testing complete!\r\n");
 }
 
-#[cfg(feature = "session-based-digest")]
 fn test_session_based_digest() -> Result<[u32; 8], DigestError> {
-    let digest = DigestClient::new(SERVICE_ID);
+    let digest = Digest::from(DIGEST.get_task_id());
     
     // Create a new session
-    let session_id = digest.create_session(DigestAlgorithm::Sha256)?;
+    let session_id = digest.init_sha256()?;
     
     // Add data to the session in chunks
     let data1 = b"Hello";
     let data2 = b", ";
     let data3 = b"World!";
     
-    digest.add_data(session_id, data1)?;
-    digest.add_data(session_id, data2)?;
-    digest.add_data(session_id, data3)?;
+    digest.update(session_id, data1.len() as u32, data1)?;
+    digest.update(session_id, data2.len() as u32, data2)?;
+    digest.update(session_id, data3.len() as u32, data3)?;
     
     // Get the final result
-    let result = digest.finalize(session_id)?;
+    let mut result = [0u32; 8];
+    digest.finalize_sha256(session_id, &mut result)?;
+    
+    Ok(result)
+}
+
+fn test_session_based_sha384() -> Result<[u32; 12], DigestError> {
+    let digest = Digest::from(DIGEST.get_task_id());
+    
+    // Create a new session
+    let session_id = digest.init_sha384()?;
+    
+    // Add data to the session in chunks
+    let data1 = b"Streaming";
+    let data2 = b" SHA-384";
+    let data3 = b" test!";
+    
+    digest.update(session_id, data1.len() as u32, data1)?;
+    digest.update(session_id, data2.len() as u32, data2)?;
+    digest.update(session_id, data3.len() as u32, data3)?;
+    
+    // Get the final result
+    let mut result = [0u32; 12];
+    digest.finalize_sha384(session_id, &mut result)?;
+    
+    Ok(result)
+}
+
+fn test_session_based_sha512() -> Result<[u32; 16], DigestError> {
+    let digest = Digest::from(DIGEST.get_task_id());
+    
+    // Create a new session
+    let session_id = digest.init_sha512()?;
+    
+    // Add data to the session in chunks
+    let data1 = b"Streaming";
+    let data2 = b" SHA-512";
+    let data3 = b" works great!";
+    
+    digest.update(session_id, data1.len() as u32, data1)?;
+    digest.update(session_id, data2.len() as u32, data2)?;
+    digest.update(session_id, data3.len() as u32, data3)?;
+    
+    // Get the final result
+    let mut result = [0u32; 16];
+    digest.finalize_sha512(session_id, &mut result)?;
     
     Ok(result)
 }
