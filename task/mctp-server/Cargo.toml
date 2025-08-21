@@ -13,6 +13,8 @@ hubpack = { workspace = true }
 zerocopy = { workspace = true }
 zerocopy-derive = { workspace = true }
 mctp-api = { path = "../mctp-api" }
+mctp-estack = { git = "https://github.com/embediver/mctp-rs.git", branch = "embassy-feature" }
+mctp = { version = "0.2.0", default-features = false }
 
 [build-dependencies]
 idol = { workspace = true }

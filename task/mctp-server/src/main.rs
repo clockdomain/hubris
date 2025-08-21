@@ -11,17 +11,20 @@
 #[allow(unused_imports)]
 use userlib::*;
 
+mod server;
+
 #[export_name = "main"]
 fn main() -> ! {
+    let mut msg_buf = [0; ipc::INCOMING_SIZE];
+    let mut server = server::Server;
     loop {
-        // NOTE: you need to put code here before running this! Otherwise LLVM
-        // will turn this into a single undefined instruction.
+        idol_runtime::dispatch(&mut msg_buf, &mut server);
     }
 }
 
 mod ipc {
     use counters::*;
-    use mctp_api::ipc::*;
+    pub use mctp_api::ipc::*;
 
     include!(concat!(env!("OUT_DIR"), "/server_stub.rs"));
 }
