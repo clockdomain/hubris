@@ -168,7 +168,7 @@ dependencies = [
  "embedded-io",
  "fugit",
  "hex-literal",
- "openprot-hal-blocking",
+ "openprot-hal-blocking 0.1.0 (git+https://github.com/rusty1968/openprot?branch=driver-model-doc)",
  "panic-halt 1.0.0",
  "proposed-traits",
 ]
@@ -1064,7 +1064,7 @@ dependencies = [
  "idol-runtime",
  "num-derive 0.4.2",
  "num-traits",
- "openprot-hal-blocking",
+ "openprot-hal-blocking 0.1.0 (git+https://github.com/OpenPRoT/openprot.git)",
  "openprot-platform-mock",
  "ringbuf",
  "userlib",
@@ -4253,13 +4253,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "openprot-hal-blocking"
+version = "0.1.0"
+source = "git+https://github.com/OpenPRoT/openprot.git#cce9286c5e6467a660fbdd92a7f2a71da10e6e8e"
+dependencies = [
+ "embedded-hal 1.0.0",
+ "zerocopy 0.8.26",
+]
+
+[[package]]
 name = "openprot-platform-mock"
 version = "0.1.0"
-source = "git+https://github.com/rusty1968/openprot?branch=driver-model-doc#e2d57e5fb23940cb68169b0f1465d24f16216df8"
+source = "git+https://github.com/OpenPRoT/openprot.git#cce9286c5e6467a660fbdd92a7f2a71da10e6e8e"
 dependencies = [
  "cortex-m",
  "embedded-hal 1.0.0",
- "openprot-hal-blocking",
+ "openprot-hal-blocking 0.1.0 (git+https://github.com/OpenPRoT/openprot.git)",
 ]
 
 [[package]]

@@ -163,8 +163,8 @@ transceiver-messages = { git = "https://github.com/oxidecomputer/transceiver-con
 vsc7448-pac = { git = "https://github.com/oxidecomputer/vsc7448", default-features = false }
 
 ## OpenPRot Initiative
-openprot-hal-blocking = { git = "https://github.com/rusty1968/openprot" , branch = "driver-model-doc" }
-openprot-platform-mock = { git = "https://github.com/rusty1968/openprot" , branch = "driver-model-doc" }
+openprot-hal-blocking = { git = "https://github.com/OpenPRoT/openprot.git"  }
+openprot-platform-mock = { git = "https://github.com/OpenPRoT/openprot.git" }
 [workspace.lints.rust]
 elided_lifetimes_in_paths = "warn"
 

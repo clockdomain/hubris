@@ -24,7 +24,6 @@
 use drv_digest_api::{DigestError};
 use idol_runtime::{ClientError, Leased, LenLimit, NotificationHandler, RequestError, R, W};
 use userlib::*;
-use heapless::FnvIndexMap;
 use zerocopy::IntoBytes;
 
 use openprot_hal_blocking::digest::{
@@ -80,7 +79,7 @@ type DefaultDigestDevice = HaceController;
 #[cfg(not(feature = "aspeed-hace"))]
 type DefaultDigestDevice = MockDigestController;
 
-// Maximum sessions based on hardware capabilities
+// Maximum sessions based on hardware capabilities  
 const fn max_sessions_for_platform() -> usize {
     // Use the actual hardware device's capabilities
     DefaultDigestDevice::MAX_CONCURRENT_SESSIONS
@@ -97,7 +96,7 @@ where
      + DigestHardwareCapabilities,
 {
     controllers: Controllers<D>,
-    sessions: FnvIndexMap<u32, DigestSession<D>, MAX_SESSIONS>,
+    current_session: Option<DigestSession<D>>,
     next_session_id: u32,
 }
 
@@ -114,6 +113,7 @@ where
      + DigestInit<Sha2_512, Output = Digest<16>>
      + DigestHardwareCapabilities,
 {
+    session_id: u32,
     algorithm: DigestAlgorithm,
     context: SessionContext<D>,
     created_at: u64, // Timestamp for timeout
@@ -160,15 +160,15 @@ where
     pub fn new(hardware: D) -> Self {
         Self { 
             controllers: Controllers { hardware: Some(hardware) },
-            sessions: FnvIndexMap::new(),
+            current_session: None,
             next_session_id: 1,
         }
     }
     
     // Session-based operations using owned API
     fn init_sha256(&mut self) -> Result<u32, DigestError> {
-        // Check if we've reached the hardware session limit
-        if self.sessions.len() >= D::MAX_CONCURRENT_SESSIONS {
+        // Check if we already have an active session
+        if self.current_session.is_some() {
             return Err(DigestError::TooManySessions);
         }
         
@@ -182,18 +182,19 @@ where
         self.next_session_id = self.next_session_id.wrapping_add(1);
         
         let session = DigestSession {
+            session_id,
             algorithm: DigestAlgorithm::Sha256,
             context: SessionContext::Sha256(Some(context)),
             created_at: sys_get_timer().now,
         };
         
-        self.sessions.insert(session_id, session).map_err(|_| DigestError::TooManySessions)?;
+        self.current_session = Some(session);
         Ok(session_id)
     }
     
     fn init_sha384(&mut self) -> Result<u32, DigestError> {
-        // Check if we've reached the hardware session limit
-        if self.sessions.len() >= D::MAX_CONCURRENT_SESSIONS {
+        // Check if we already have an active session
+        if self.current_session.is_some() {
             return Err(DigestError::TooManySessions);
         }
         
@@ -207,18 +208,19 @@ where
         self.next_session_id = self.next_session_id.wrapping_add(1);
         
         let session = DigestSession {
+            session_id,
             algorithm: DigestAlgorithm::Sha384,
             context: SessionContext::Sha384(Some(context)),
             created_at: sys_get_timer().now,
         };
         
-        self.sessions.insert(session_id, session).map_err(|_| DigestError::TooManySessions)?;
+        self.current_session = Some(session);
         Ok(session_id)
     }
     
     fn init_sha512(&mut self) -> Result<u32, DigestError> {
-        // Check if we've reached the hardware session limit
-        if self.sessions.len() >= D::MAX_CONCURRENT_SESSIONS {
+        // Check if we already have an active session
+        if self.current_session.is_some() {
             return Err(DigestError::TooManySessions);
         }
         
@@ -232,18 +234,24 @@ where
         self.next_session_id = self.next_session_id.wrapping_add(1);
         
         let session = DigestSession {
+            session_id,
             algorithm: DigestAlgorithm::Sha512,
             context: SessionContext::Sha512(Some(context)),
             created_at: sys_get_timer().now,
         };
         
-        self.sessions.insert(session_id, session).map_err(|_| DigestError::TooManySessions)?;
+        self.current_session = Some(session);
         Ok(session_id)
     }
     
     fn update(&mut self, session_id: u32, data: &[u8]) -> Result<(), DigestError> {
-        let session = self.sessions.get_mut(&session_id)
+        let session = self.current_session.as_mut()
             .ok_or(DigestError::InvalidSession)?;
+        
+        // Verify session ID matches
+        if session.session_id != session_id {
+            return Err(DigestError::InvalidSession);
+        }
         
         match &mut session.context {
             SessionContext::Sha256(ctx_opt) => {
@@ -268,8 +276,15 @@ where
     }
     
     fn finalize_sha256_internal(&mut self, session_id: u32) -> Result<[u32; 8], DigestError> {
-        let mut session = self.sessions.remove(&session_id)
+        let mut session = self.current_session.take()
             .ok_or(DigestError::InvalidSession)?;
+        
+        // Verify session ID matches
+        if session.session_id != session_id {
+            // Put session back if ID doesn't match
+            self.current_session = Some(session);
+            return Err(DigestError::InvalidSession);
+        }
         
         match &mut session.context {
             SessionContext::Sha256(ctx_opt) => {
@@ -288,8 +303,15 @@ where
     }
     
     fn finalize_sha384_internal(&mut self, session_id: u32) -> Result<[u32; 12], DigestError> {
-        let mut session = self.sessions.remove(&session_id)
+        let mut session = self.current_session.take()
             .ok_or(DigestError::InvalidSession)?;
+        
+        // Verify session ID matches
+        if session.session_id != session_id {
+            // Put session back if ID doesn't match
+            self.current_session = Some(session);
+            return Err(DigestError::InvalidSession);
+        }
         
         match &mut session.context {
             SessionContext::Sha384(ctx_opt) => {
@@ -308,8 +330,15 @@ where
     }
     
     fn finalize_sha512_internal(&mut self, session_id: u32) -> Result<[u32; 16], DigestError> {
-        let mut session = self.sessions.remove(&session_id)
+        let mut session = self.current_session.take()
             .ok_or(DigestError::InvalidSession)?;
+        
+        // Verify session ID matches
+        if session.session_id != session_id {
+            // Put session back if ID doesn't match
+            self.current_session = Some(session);
+            return Err(DigestError::InvalidSession);
+        }
         
         match &mut session.context {
             SessionContext::Sha512(ctx_opt) => {
