@@ -61,7 +61,7 @@ impl DigestHardwareCapabilities for MockDigestController {
 
 // Conditional imports based on features
 #[cfg(feature = "aspeed-hace")]
-use aspeed_ddk::hace::HaceController;
+use aspeed_ddk::hace_controller::HaceController;
 
 #[cfg(not(feature = "aspeed-hace"))]
 use openprot_platform_mock::hash::owned::MockDigestController;
@@ -618,7 +618,11 @@ where
 pub extern "C" fn main() -> ! {
     // Initialize hardware device
     #[cfg(feature = "aspeed-hace")]
-    let hardware = HaceController::new();
+    let hardware = {
+        use ast1060_pac::Peripherals;
+        let peripherals = unsafe { Peripherals::steal() };
+        HaceController::new(peripherals.hace)
+    };
     
     #[cfg(not(feature = "aspeed-hace"))]
     let hardware = MockDigestController::new();

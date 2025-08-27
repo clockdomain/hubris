@@ -158,9 +158,9 @@ checksum = "96d30a06541fbafbc7f82ed10c06164cfbd2c401138f6addd8404629c4b16711"
 [[package]]
 name = "aspeed-ddk"
 version = "0.1.0"
-source = "git+https://github.com/rusty1968/aspeed-rust.git?branch=refactor-hace#f3d522e497e6047abd7c0f150d8cc37ec4097408"
+source = "git+https://github.com/rusty1968/aspeed-rust.git?branch=hash-owned#5860ec4458666de207d9d44c20f10823f3c7f6d5"
 dependencies = [
- "ast1060-pac 0.1.0 (git+https://github.com/rusty1968/ast1060-pac.git)",
+ "ast1060-pac",
  "cortex-m",
  "cortex-m-rt",
  "embedded-hal 1.0.0",
@@ -168,9 +168,11 @@ dependencies = [
  "embedded-io",
  "fugit",
  "hex-literal",
- "openprot-hal-blocking 0.1.0 (git+https://github.com/rusty1968/openprot?branch=driver-model-doc)",
+ "openprot-hal-blocking",
  "panic-halt 1.0.0",
+ "paste",
  "proposed-traits",
+ "zerocopy 0.8.26",
 ]
 
 [[package]]
@@ -184,20 +186,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "ast1060-pac"
-version = "0.1.0"
-source = "git+https://github.com/rusty1968/ast1060-pac.git#35ce8190e9b40deff918300b69d23079ca15a3f4"
-dependencies = [
- "cortex-m",
- "cortex-m-rt",
- "vcell",
-]
-
-[[package]]
 name = "ast1060-starter"
 version = "0.1.0"
 dependencies = [
- "ast1060-pac 0.1.0 (git+https://github.com/aspeedtech-bmc/ast1060-pac.git)",
+ "ast1060-pac",
  "cortex-m",
  "cortex-m-rt",
  "kern",
@@ -1055,6 +1047,7 @@ name = "digest-server"
 version = "0.1.0"
 dependencies = [
  "aspeed-ddk",
+ "ast1060-pac",
  "build-util",
  "cortex-m",
  "counters",
@@ -1064,7 +1057,7 @@ dependencies = [
  "idol-runtime",
  "num-derive 0.4.2",
  "num-traits",
- "openprot-hal-blocking 0.1.0 (git+https://github.com/OpenPRoT/openprot.git)",
+ "openprot-hal-blocking",
  "openprot-platform-mock",
  "ringbuf",
  "userlib",
@@ -1077,7 +1070,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aspeed-ddk",
- "ast1060-pac 0.1.0 (git+https://github.com/aspeedtech-bmc/ast1060-pac.git)",
+ "ast1060-pac",
  "build-util",
  "cortex-m",
  "embedded-hal 0.2.6",
@@ -1095,7 +1088,7 @@ name = "drv-ast1060-uart-bak"
 version = "0.1.0"
 dependencies = [
  "aspeed-ddk",
- "ast1060-pac 0.1.0 (git+https://github.com/aspeedtech-bmc/ast1060-pac.git)",
+ "ast1060-pac",
  "build-util",
  "cortex-m",
  "embedded-hal 0.2.6",
@@ -3716,7 +3709,7 @@ name = "lib-ast1060-uart"
 version = "0.1.0"
 dependencies = [
  "aspeed-ddk",
- "ast1060-pac 0.1.0 (git+https://github.com/aspeedtech-bmc/ast1060-pac.git)",
+ "ast1060-pac",
  "embedded-hal 0.2.6",
  "nb 1.1.0",
  "unwrap-lite",
@@ -4246,15 +4239,6 @@ checksum = "6f61fba1741ea2b3d6a1e3178721804bb716a68a6aeba1149b5d52e3d464ea66"
 [[package]]
 name = "openprot-hal-blocking"
 version = "0.1.0"
-source = "git+https://github.com/rusty1968/openprot?branch=driver-model-doc#e2d57e5fb23940cb68169b0f1465d24f16216df8"
-dependencies = [
- "embedded-hal 1.0.0",
- "zerocopy 0.8.26",
-]
-
-[[package]]
-name = "openprot-hal-blocking"
-version = "0.1.0"
 source = "git+https://github.com/OpenPRoT/openprot.git#cce9286c5e6467a660fbdd92a7f2a71da10e6e8e"
 dependencies = [
  "embedded-hal 1.0.0",
@@ -4268,7 +4252,7 @@ source = "git+https://github.com/OpenPRoT/openprot.git#cce9286c5e6467a660fbdd92a
 dependencies = [
  "cortex-m",
  "embedded-hal 1.0.0",
- "openprot-hal-blocking 0.1.0 (git+https://github.com/OpenPRoT/openprot.git)",
+ "openprot-hal-blocking",
 ]
 
 [[package]]
@@ -4594,7 +4578,7 @@ dependencies = [
 [[package]]
 name = "proposed-traits"
 version = "0.1.0"
-source = "git+https://github.com/rusty1968/proposed_traits.git?rev=43fe54addf323dc17915f1fc5f991f9d94eb161a#43fe54addf323dc17915f1fc5f991f9d94eb161a"
+source = "git+https://github.com/rusty1968/proposed_traits.git?rev=85641310df5a5276c67f81621b104322cff0286c#85641310df5a5276c67f81621b104322cff0286c"
 dependencies = [
  "async-trait",
  "embedded-hal 1.0.0",

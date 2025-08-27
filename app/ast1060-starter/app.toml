@@ -38,7 +38,8 @@ name = "digest-server"
 priority = 2
 max-sizes = {flash = 16384, ram = 16384}
 start = true
-stacksize = 3200
+stacksize = 10240
+features = ["aspeed-hace"]
 
 [tasks.helloworld]
 name = "task-helloworld"
