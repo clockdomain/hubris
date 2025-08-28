@@ -126,7 +126,8 @@ pub struct MctpListener<'r> {
     handle: ipc::GenericHandle,
 }
 impl Listener for MctpListener<'_> {
-    type RespChannel<'a> = MctpRespChannel<'a>
+    type RespChannel<'a>
+        = MctpRespChannel<'a>
     where
         Self: 'a;
 
@@ -268,7 +269,7 @@ pub mod ipc {
         SerializedSize,
     )]
     #[repr(transparent)]
-    pub struct GenericHandle(u8);
+    pub struct GenericHandle(pub u8);
 
     pub mod client {
         use super::*;

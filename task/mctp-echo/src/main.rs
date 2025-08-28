@@ -12,7 +12,6 @@
 #![no_main]
 
 use mctp::{Eid, Listener, MsgType, RespChannel};
-use mctp_api::{MctpListener, Stack};
 use userlib::*;
 
 task_slot!(MCTP, mctp_server);
