@@ -110,11 +110,11 @@ fn test_oneshot_sha256_known_vector() {
             uart_send(b"\r\n");
             
             // Expected: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-            // (in little-endian u32 format)
-            let expected = [0x8f01cfea_u32.to_le(), 0x414140de_u32.to_le(), 
-                           0x5dae2223_u32.to_le(), 0xb00361a3_u32.to_le(),
-                           0x96177a9c_u32.to_le(), 0xb410ff61_u32.to_le(),
-                           0xf20015ad_u32.to_le(), 0xba7816bf_u32.to_le()];
+            // (in big-endian u32 format)
+            let expected = [0xba7816bf_u32, 0x8f01cfea_u32, 
+                           0x414140de_u32, 0x5dae2223_u32,
+                           0xb00361a3_u32, 0x96177a9c_u32,
+                           0xb410ff61_u32, 0xf20015ad_u32];
             
             if result == expected {
                 uart_send(b"    [OK] Known vector matches!\r\n");

@@ -6,7 +6,7 @@ edition = "2021"
 [features]
 default = ["mock"]
 mock = ["openprot-platform-mock"]
-aspeed-hace = ["aspeed-ddk", "ast1060-pac"]
+aspeed-hace = ["aspeed-ddk", "ast1060-pac", "embedded-hal-1", "proposed-traits"]
 
 [dependencies]
 userlib = { path = "../../sys/userlib" }
@@ -29,6 +29,8 @@ openprot-platform-mock = { workspace = true, optional = true }
 # Hardware-specific dependencies
 aspeed-ddk = { workspace = true, optional = true }
 ast1060-pac = { workspace = true, optional = true }
+embedded-hal-1 = { workspace = true, optional = true }
+proposed-traits = { workspace = true, optional = true }
 
 [lints]
 workspace = true

@@ -603,6 +603,18 @@ where
 // Type alias for the default server implementation
 type DefaultServerImpl = ServerImpl<DefaultDigestDevice>;
 
+// Dummy delay implementation for syscon
+#[cfg(feature = "aspeed-hace")]
+#[derive(Default)]
+struct DummyDelay;
+
+#[cfg(feature = "aspeed-hace")]
+impl embedded_hal_1::delay::DelayNs for DummyDelay {
+    fn delay_ns(&mut self, _ns: u32) {
+        // No-op delay for now
+    }
+}
+
 // Server instantiation and task entry point
 impl<D> ServerImpl<D>
 where
@@ -620,7 +632,20 @@ pub extern "C" fn main() -> ! {
     #[cfg(feature = "aspeed-hace")]
     let hardware = {
         use ast1060_pac::Peripherals;
+        use aspeed_ddk::syscon::{SysCon, ClockId, ResetId};
+        use proposed_traits::system_control::{ClockControl, ResetControl};
+        
         let peripherals = unsafe { Peripherals::steal() };
+        
+        // Set up system control and enable HACE
+        let mut syscon = SysCon::new(DummyDelay::default(), peripherals.scu);
+        
+        // Enable HACE clock
+        let _ = syscon.enable(&ClockId::ClkYCLK);
+        
+        // Release HACE from reset  
+        let _ = syscon.reset_deassert(&ResetId::RstHACE);
+        
         HaceController::new(peripherals.hace)
     };
     

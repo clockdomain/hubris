@@ -13,6 +13,9 @@ ast1060-pac = { workspace = true, features = ["rt"] }
 cortex-m = { workspace = true }
 cortex-m-rt = { workspace = true }
 kern = { path = "../../sys/kern" }
+aspeed-ddk = { workspace = true }
+embedded-hal-1 = { workspace = true }
+proposed-traits = { workspace = true }
 
 # this lets you use `cargo fix`!
 [[bin]]

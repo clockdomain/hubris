@@ -10,17 +10,28 @@
 
 use cortex_m_rt::entry;
 use ast1060_pac::Peripherals;
+// Individual tasks will handle their own peripheral setup
 
 #[cfg(feature = "jtag-halt")]
 use core::ptr::{self, addr_of};
 
 #[entry]
 fn main() -> ! {
+    // Initialize system
+    system_init();
 
+    // Default boot speed, until we bother raising it:
+    const CYCLES_PER_MS: u32 = 200_000;
+
+    unsafe { kern::startup::start_kernel(CYCLES_PER_MS) }
+}
+
+fn system_init() {
     // This code just forces the ast1060 pac to be linked in.
     let peripherals = unsafe {
         Peripherals::steal()
     };
+    
     peripherals.scu.scu000().modify(|_, w| {
         w
     });
@@ -33,13 +44,10 @@ fn main() -> ! {
             .enbl_armtdofn_pin().bit(true)
     });
 
+    // Basic system setup - let individual tasks handle their own peripherals
+
     #[cfg(feature = "jtag-halt")]
     jtag_halt();
-
-    // Default boot speed, until we bother raising it:
-    const CYCLES_PER_MS: u32 = 200_000;
-
-    unsafe { kern::startup::start_kernel(CYCLES_PER_MS) }
 }
 
 #[cfg(feature = "jtag-halt")]
