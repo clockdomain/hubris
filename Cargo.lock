@@ -1358,6 +1358,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "drv-i2c-server-generic"
+version = "0.1.0"
+dependencies = [
+ "bitfield 0.13.2",
+ "build-i2c",
+ "build-util",
+ "cfg-if",
+ "counters",
+ "drv-i2c-api",
+ "drv-i2c-types",
+ "drv-stm32xx-i2c",
+ "drv-stm32xx-sys-api",
+ "fixedmap",
+ "idol-runtime",
+ "num-traits",
+ "ringbuf",
+ "stm32g0",
+ "stm32h7",
+ "userlib",
+ "zerocopy 0.8.25",
+ "zerocopy-derive 0.8.25",
+]
+
+[[package]]
 name = "drv-i2c-types"
 version = "0.1.0"
 dependencies = [
@@ -2537,6 +2561,7 @@ dependencies = [
  "cfg-if",
  "counters",
  "drv-i2c-api",
+ "drv-i2c-types",
  "drv-stm32xx-sys-api",
  "num-traits",
  "ringbuf",

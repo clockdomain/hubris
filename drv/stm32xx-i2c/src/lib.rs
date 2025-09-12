@@ -45,6 +45,7 @@ use ringbuf::*;
 use userlib::*;
 
 use drv_stm32xx_sys_api as sys_api;
+use drv_i2c_types::{I2cHardware, I2cSpeed};
 
 pub struct I2cPins {
     pub controller: drv_i2c_api::Controller,
@@ -1189,5 +1190,220 @@ impl I2cController<'_> {
                 });
             }
         }
+    }
+}
+
+
+/// STM32 I2C hardware abstraction implementation
+/// 
+/// This struct provides a hardware abstraction layer over the existing STM32 I2C 
+/// driver, enabling platform-agnostic I2C server implementations while maintaining
+/// all the sophisticated error handling, timing, and recovery features of the
+/// original STM32-specific implementation.
+pub struct Stm32I2cHardware<'a> {
+    /// Collection of I2C controllers available on this STM32 variant
+    pub controllers: &'a [I2cController<'a>],
+    /// Pin configuration for all I2C ports
+    pub pins: &'a [I2cPins],
+    /// System interface for GPIO/clock control
+    pub sys: &'a sys_api::Sys,
+    /// Interrupt control functions
+    pub ctrl: &'a I2cControl,
+}
+
+impl<'a> Stm32I2cHardware<'a> {
+    /// Create a new STM32 I2C hardware abstraction
+    pub fn new(
+        controllers: &'a [I2cController<'a>],
+        pins: &'a [I2cPins],
+        sys: &'a sys_api::Sys,
+        ctrl: &'a I2cControl,
+    ) -> Self {
+        Self {
+            controllers,
+            pins,
+            sys,
+            ctrl,
+        }
+    }
+
+    /// Find controller by ID
+    fn find_controller(
+        &self,
+        controller: drv_i2c_types::Controller,
+    ) -> Result<&I2cController<'a>, drv_i2c_api::ResponseCode> {
+        self.controllers
+            .iter()
+            .find(|c| c.controller == controller)
+            .ok_or(drv_i2c_api::ResponseCode::BadController)
+    }
+
+    /// Find pins for controller/port combination
+    fn find_pins(
+        &self,
+        controller: drv_i2c_types::Controller,
+        port: drv_i2c_types::PortIndex,
+    ) -> Result<&I2cPins, drv_i2c_api::ResponseCode> {
+        self.pins
+            .iter()
+            .find(|pin| pin.controller == controller && pin.port == port)
+            .ok_or(drv_i2c_api::ResponseCode::BadPort)
+    }
+}
+
+impl<'a> I2cHardware for Stm32I2cHardware<'a> {
+    type Error = drv_i2c_api::ResponseCode;
+
+    fn write_read(
+        &mut self,
+        controller: drv_i2c_types::Controller,
+        addr: u8,
+        write_data: &[u8],
+        read_buffer: &mut [u8],
+    ) -> Result<usize, Self::Error> {
+        let ctrl = self.find_controller(controller)?;
+        
+        // Validate address is not reserved
+        if let Some(_reserved) = drv_i2c_types::ReservedAddress::from_u8(addr) {
+            return Err(drv_i2c_api::ResponseCode::ReservedAddress);
+        }
+
+        let write_len = write_data.len();
+        let read_len = read_buffer.len();
+
+        // Validate buffer sizes (STM32 constraint: max 255 bytes per operation)
+        if write_len > 255 || read_len > 255 {
+            return Err(drv_i2c_api::ResponseCode::TooMuchData);
+        }
+
+        // Use existing STM32 write_read implementation with closures
+        let mut bytes_read = 0;
+        
+        ctrl.write_read(
+            addr,
+            write_len,
+            |pos| write_data.get(pos).copied(),
+            if read_len > 0 {
+                ReadLength::Fixed(read_len)
+            } else {
+                ReadLength::Fixed(0)
+            },
+            |pos, byte| {
+                if let Some(slot) = read_buffer.get_mut(pos) {
+                    *slot = byte;
+                    bytes_read = pos + 1;
+                    Some(())
+                } else {
+                    None
+                }
+            },
+            self.ctrl,
+        )?;
+
+        Ok(bytes_read)
+    }
+
+    fn write_read_block(
+        &mut self,
+        controller: drv_i2c_types::Controller,
+        addr: u8,
+        write_data: &[u8],
+        read_buffer: &mut [u8],
+    ) -> Result<usize, Self::Error> {
+        let ctrl = self.find_controller(controller)?;
+        
+        // Validate address is not reserved
+        if let Some(_reserved) = drv_i2c_types::ReservedAddress::from_u8(addr) {
+            return Err(drv_i2c_api::ResponseCode::ReservedAddress);
+        }
+
+        let write_len = write_data.len();
+        
+        // Validate buffer sizes
+        if write_len > 255 || read_buffer.len() > 255 {
+            return Err(drv_i2c_api::ResponseCode::TooMuchData);
+        }
+
+        // Use existing STM32 write_read implementation with variable-length read
+        let mut bytes_read = 0;
+        
+        ctrl.write_read(
+            addr,
+            write_len,
+            |pos| write_data.get(pos).copied(),
+            ReadLength::Variable, // SMBus block read - first byte is length
+            |pos, byte| {
+                if let Some(slot) = read_buffer.get_mut(pos) {
+                    *slot = byte;
+                    bytes_read = pos + 1;
+                    Some(())
+                } else {
+                    None
+                }
+            },
+            self.ctrl,
+        )?;
+
+        Ok(bytes_read)
+    }
+
+    fn configure_timing(
+        &mut self,
+        controller: drv_i2c_types::Controller,
+        speed: I2cSpeed,
+    ) -> Result<(), Self::Error> {
+        let ctrl = self.find_controller(controller)?;
+        
+        // The existing STM32 implementation has speed configuration built into
+        // configure_timing(), but it's hardcoded for specific board/chip combinations.
+        // For now, we call the existing timing configuration.
+        // TODO: Extend configure_timing() to accept speed parameter
+        ctrl.configure_timing(ctrl.registers);
+        
+        Ok(())
+    }
+
+    fn reset_bus(
+        &mut self,
+        controller: drv_i2c_types::Controller,
+    ) -> Result<(), Self::Error> {
+        let ctrl = self.find_controller(controller)?;
+        
+        // Use existing STM32 reset implementation
+        ctrl.reset();
+        
+        Ok(())
+    }
+
+    fn enable_controller(
+        &mut self,
+        controller: drv_i2c_types::Controller,
+    ) -> Result<(), Self::Error> {
+        let ctrl = self.find_controller(controller)?;
+        
+        // Enable clocks and release from reset
+        ctrl.enable(self.sys);
+        
+        // Configure timing after enabling
+        ctrl.configure_timing(ctrl.registers);
+        
+        Ok(())
+    }
+
+    fn disable_controller(
+        &mut self,
+        controller: drv_i2c_types::Controller,
+    ) -> Result<(), Self::Error> {
+        let ctrl = self.find_controller(controller)?;
+        
+        // Disable I2C controller
+        let i2c = ctrl.registers;
+        i2c.cr1.modify(|_, w| w.pe().clear_bit());
+        
+        // Put peripheral back in reset and disable clocks  
+        self.sys.enter_reset(ctrl.peripheral);
+        self.sys.disable_clock(ctrl.peripheral);
+        
+        Ok(())
     }
 }
