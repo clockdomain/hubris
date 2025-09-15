@@ -2,22 +2,14 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Driver for the PCA9545 I2C mux
+//! Driver for the PCA9545 I2C mux - STM32 platform integration
 
+use crate::mux_adapters::{Stm32GpioPin, Stm32I2cHardware};
 use crate::*;
-use bitfield::bitfield;
 use drv_i2c_api::{ResponseCode, Segment};
+use drv_i2c_mux_core::{pca9545::Pca9545 as GenericPca9545, I2cMuxConfig, I2cMuxDriver as GenericI2cMuxDriver};
 
 pub struct Pca9545;
-
-bitfield! {
-    #[derive(Copy, Clone, Eq, PartialEq)]
-    pub struct ControlRegister(u8);
-    channel3_enabled, set_channel3_enabled: 3;
-    channel2_enabled, set_channel2_enabled: 2;
-    channel1_enabled, set_channel1_enabled: 1;
-    channel0_enabled, set_channel0_enabled: 0;
-}
 
 impl I2cMuxDriver for Pca9545 {
     fn configure(
@@ -27,7 +19,15 @@ impl I2cMuxDriver for Pca9545 {
         gpio: &sys_api::Sys,
         _ctrl: &I2cControl,
     ) -> Result<(), drv_i2c_api::ResponseCode> {
-        mux.configure(gpio)
+        // Handle GPIO configuration using the generic driver
+        let generic_driver = GenericPca9545;
+        let mut config = I2cMuxConfig {
+            controller: drv_i2c_api::Controller::I2C1, // TODO: map from mux.controller
+            address: mux.address,
+            reset_pin: mux.nreset.as_ref().map(|gpio_ref| Stm32GpioPin::from_i2c_gpio(gpio_ref, gpio)),
+        };
+        
+        <GenericPca9545 as GenericI2cMuxDriver<Stm32I2cHardware<'_>, Stm32GpioPin<'_>>>::configure(&generic_driver, &mut config)
     }
 
     fn enable_segment(
@@ -37,42 +37,17 @@ impl I2cMuxDriver for Pca9545 {
         segment: Option<Segment>,
         ctrl: &I2cControl,
     ) -> Result<(), ResponseCode> {
-        let mut reg = ControlRegister(0);
+        let generic_driver = GenericPca9545;
+        let config = I2cMuxConfig {
+            controller: drv_i2c_api::Controller::I2C1, // TODO: map from mux.controller
+            address: mux.address,
+            reset_pin: None, // Not needed for segment operations
+        };
+        let mut i2c_hardware = Stm32I2cHardware { controller, ctrl };
 
-        if let Some(segment) = segment {
-            match segment {
-                Segment::S1 => {
-                    reg.set_channel0_enabled(true);
-                }
-                Segment::S2 => {
-                    reg.set_channel1_enabled(true);
-                }
-                Segment::S3 => {
-                    reg.set_channel2_enabled(true);
-                }
-                Segment::S4 => {
-                    reg.set_channel3_enabled(true);
-                }
-                _ => {
-                    return Err(ResponseCode::SegmentNotFound);
-                }
-            }
-        }
-
-        //
-        // This part has but one register -- any write is to the control
-        // register.
-        //
-        match controller.write_read(
-            mux.address,
-            1,
-            |_| Some(reg.0),
-            ReadLength::Fixed(0),
-            |_, _| Some(()),
-            ctrl,
-        ) {
+        match <GenericPca9545 as GenericI2cMuxDriver<Stm32I2cHardware<'_>, Stm32GpioPin<'_>>>::enable_segment(&generic_driver, &mut i2c_hardware, &config, segment) {
             Err(code) => Err(mux.error_code(code)),
-            _ => Ok(()),
+            Ok(()) => Ok(()),
         }
     }
 
@@ -81,6 +56,13 @@ impl I2cMuxDriver for Pca9545 {
         mux: &I2cMux<'_>,
         gpio: &sys_api::Sys,
     ) -> Result<(), drv_i2c_api::ResponseCode> {
-        mux.reset(gpio)
+        let generic_driver = GenericPca9545;
+        let mut config = I2cMuxConfig {
+            controller: drv_i2c_api::Controller::I2C1, // TODO: map from mux.controller
+            address: mux.address,
+            reset_pin: mux.nreset.as_ref().map(|gpio_ref| Stm32GpioPin::from_i2c_gpio(gpio_ref, gpio)),
+        };
+        
+        <GenericPca9545 as GenericI2cMuxDriver<Stm32I2cHardware<'_>, Stm32GpioPin<'_>>>::reset(&generic_driver, &mut config)
     }
 }
