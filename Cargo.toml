@@ -169,6 +169,8 @@ mctp = { git = "https://github.com/9elements/mctp-rs.git", branch = "main", defa
 
 # OpenPRot
 openprot-platform-mock = { git = "https://github.com/rusty1968/openprot.git", branch = "i2c-hardware" }
+openprot-hal-blocking = { git = "https://github.com/rusty1968/openprot.git", branch = "i2c-hardware" }
+openprot-hal-nb = { git = "https://github.com/rusty1968/openprot.git", branch = "i2c-hardware" }
 
 [patch.crates-io]
 # See https://gitlab.com/robigalia/ssmarshal/-/merge_requests/2
