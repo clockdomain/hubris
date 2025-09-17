@@ -178,7 +178,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ast1060-mctp-echo"
+name = "ast1060-i2c-scaffold"
 version = "0.1.0"
 dependencies = [
  "ast1060-pac",
@@ -1055,6 +1055,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "drv-ast1060-uart"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aspeed-ddk",
+ "ast1060-pac",
+ "build-util",
+ "cortex-m",
+ "embedded-hal 0.2.6",
+ "idol",
+ "lib-ast1060-uart",
+ "nb 1.1.0",
+ "serde",
+ "userlib",
+ "zerocopy 0.8.27",
+ "zerocopy-derive 0.8.27",
+]
+
+[[package]]
+name = "drv-ast1060-uart-bak"
+version = "0.1.0"
+dependencies = [
+ "aspeed-ddk",
+ "ast1060-pac",
+ "build-util",
+ "cortex-m",
+ "embedded-hal 0.2.6",
+ "num-traits",
+ "userlib",
+ "zerocopy 0.8.27",
+ "zerocopy-derive 0.8.27",
+]
+
+[[package]]
 name = "drv-auxflash-api"
 version = "0.1.0"
 dependencies = [
@@ -1444,7 +1478,7 @@ dependencies = [
  "hubpack",
  "num-derive 0.4.2",
  "num-traits",
- "openprot-hal-blocking",
+ "openprot-hal-blocking 0.1.0 (git+https://github.com/rusty1968/openprot.git?branch=i2c-hardware)",
  "openprot-platform-mock",
  "serde",
  "serde-big-array 0.4.1",
@@ -1976,11 +2010,11 @@ dependencies = [
  "drv-i2c-types",
  "embedded-hal 0.2.6",
  "fixedmap",
- "heapless",
+ "heapless 0.7.17",
  "ringbuf",
  "userlib",
- "zerocopy 0.8.26",
- "zerocopy-derive 0.8.26",
+ "zerocopy 0.8.27",
+ "zerocopy-derive 0.8.27",
 ]
 
 [[package]]
@@ -3702,6 +3736,7 @@ version = "0.1.0"
 dependencies = [
  "aspeed-ddk",
  "ast1060-pac",
+ "embedded-hal 0.2.6",
  "embedded-io",
  "nb 1.1.0",
  "unwrap-lite",
@@ -4362,13 +4397,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "openprot-hal-blocking"
+version = "0.1.0"
+source = "git+https://github.com/OpenPRoT/openprot#2c2a8760a5b22ab25c9bc867799d488fa3033688"
+dependencies = [
+ "embedded-hal 1.0.0",
+ "rand_core 0.9.3",
+ "subtle",
+ "zerocopy 0.8.27",
+>>>>>>> fe19b839 (feat: Add AST1060 I2C Scaffold App with Mock Driver .)
+ "zeroize",
+]
+
+[[package]]
 name = "openprot-platform-mock"
 version = "0.1.0"
 source = "git+https://github.com/rusty1968/openprot.git?branch=i2c-hardware#54105b4e797c77b56cf1e25a62169c9e89f342e9"
 dependencies = [
  "cortex-m",
  "embedded-hal 1.0.0",
- "openprot-hal-blocking",
+ "openprot-hal-blocking 0.1.0 (git+https://github.com/rusty1968/openprot.git?branch=i2c-hardware)",
 ]
 
 [[package]]
@@ -5768,6 +5816,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "task-helloworld"
+version = "0.1.0"
+dependencies = [
+ "userlib",
+]
+
+[[package]]
 name = "task-hiffy"
 version = "0.1.0"
 dependencies = [
@@ -5863,6 +5918,19 @@ dependencies = [
  "userlib",
  "zerocopy 0.8.27",
  "zerocopy-derive 0.8.27",
+]
+
+[[package]]
+name = "task-i2c-client"
+version = "0.1.0"
+dependencies = [
+ "build-util",
+ "drv-i2c-api",
+ "drv-i2c-types",
+ "ringbuf",
+ "userlib",
+ "zerocopy 0.7.32",
+>>>>>>> fe19b839 (feat: Add AST1060 I2C Scaffold App with Mock Driver .)
 ]
 
 [[package]]
