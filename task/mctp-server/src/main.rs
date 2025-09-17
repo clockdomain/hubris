@@ -7,12 +7,14 @@
 
 use userlib::*;
 
+mod serial;
 mod server;
 
 #[export_name = "main"]
 fn main() -> ! {
     let mut msg_buf = [0; ipc::INCOMING_SIZE];
-    let mut server = server::Server;
+    let mut server =
+        server::Server::new(mctp::Eid(42), 0, serial::SerialSender {});
 
     loop {
         let msg = sys_recv_open(&mut msg_buf, 0);
@@ -27,10 +29,10 @@ mod ipc {
     include!(concat!(env!("OUT_DIR"), "/server_stub.rs"));
 }
 
-fn handle_mctp_msg(
+fn handle_mctp_msg<S: mctp_stack::Sender>(
     msg_buf: &[u8],
     recv_msg: RecvMessage,
-    server: &mut server::Server,
+    server: &mut server::Server<S>,
 ) {
     use hubpack::deserialize;
     use idol_runtime::Leased;

@@ -13,7 +13,7 @@ derive-idol-err = { path = "../../lib/derive-idol-err"  }
 idol-runtime = { workspace = true }
 hubpack = { workspace = true }
 serde = { workspace = true }
-mctp = {version = "0.2.0", default-features = false }
+mctp = { workspace = true }
 
 [build-dependencies]
 idol = { workspace = true }

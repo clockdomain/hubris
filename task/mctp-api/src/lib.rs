@@ -243,6 +243,10 @@ pub mod ipc {
         #[idol(server_death)]
         ServerRestarted = 1,
         InternalError = 2,
+        NoSpace = 3,
+        AddrInUse = 4,
+        TimedOut = 5,
+        BadArgument = 6,
     }
 
     impl From<ServerError> for mctp::Error {
@@ -252,6 +256,23 @@ pub mod ipc {
             match value {
                 ServerError::InternalError => InternalError,
                 ServerError::ServerRestarted => InternalError,
+                ServerError::NoSpace => NoSpace,
+                ServerError::AddrInUse => AddrInUse,
+                ServerError::TimedOut => TimedOut,
+                ServerError::BadArgument => BadArgument,
+            }
+        }
+    }
+    impl From<mctp::Error> for ServerError {
+        fn from(value: mctp::Error) -> Self {
+            // this will probably map nearly 1:1 once everything is implemented
+            match value {
+                mctp::Error::InternalError => ServerError::InternalError,
+                mctp::Error::NoSpace => ServerError::NoSpace,
+                mctp::Error::AddrInUse => ServerError::AddrInUse,
+                mctp::Error::TimedOut => ServerError::TimedOut,
+                mctp::Error::BadArgument => ServerError::BadArgument,
+                _ => ServerError::InternalError,
             }
         }
     }

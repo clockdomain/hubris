@@ -762,9 +762,9 @@ dependencies = [
 
 [[package]]
 name = "crc"
-version = "3.0.0"
+version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53757d12b596c16c78b83458d732a5d1a17ab3f53f2f7412f6fb57cc8a140ab3"
+checksum = "9710d3b3739c2e349eb44fe848ad0b7c8cb1e42bd87ee49371df2f7acaf3e675"
 dependencies = [
  "crc-catalog",
 ]
@@ -777,9 +777,9 @@ checksum = "774646b687f63643eb0f4bf13dc263cb581c8c9e57973b6ddf78bda3994d88df"
 
 [[package]]
 name = "crc-catalog"
-version = "2.1.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d0165d2900ae6778e36e80bbc4da3b5eefccee9ba939761f9c2882a5d9af3ff"
+checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
 
 [[package]]
 name = "crc32fast"
@@ -2853,6 +2853,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedded-io"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
+
+[[package]]
 name = "encode_unicode"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3844,13 +3850,12 @@ checksum = "60302e4db3a61da70c0cb7991976248362f30319e88850c487b9b95bbf059e00"
 [[package]]
 name = "mctp"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8280034c4afaa377d825c17261987ff26a638369ea4b46919e1726741eec253"
+source = "git+https://github.com/9elements/mctp-rs.git?branch=embassy-feature#c632a6737ccbfbbe1d8382e40d2c2b9b90634f20"
 
 [[package]]
 name = "mctp"
 version = "0.2.0"
-source = "git+https://github.com/embediver/mctp-rs.git?branch=embassy-feature#e061354835d47148ae1c379bdac1eacd0f2a5783"
+source = "git+https://github.com/9elements/mctp-rs.git?branch=leongross%2Fserial-sync#1cfde344b50bf47940a645e958408cba882b3b24"
 
 [[package]]
 name = "mctp-api"
@@ -3861,7 +3866,7 @@ dependencies = [
  "hubpack",
  "idol",
  "idol-runtime",
- "mctp 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "mctp 0.2.0 (git+https://github.com/9elements/mctp-rs.git?branch=embassy-feature)",
  "num-traits",
  "serde",
  "userlib",
@@ -3870,10 +3875,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mctp-baremetal"
+version = "0.1.0"
+dependencies = [
+ "mctp 0.2.0 (git+https://github.com/9elements/mctp-rs.git?branch=embassy-feature)",
+ "mctp-estack 0.1.0 (git+https://github.com/9elements/mctp-rs.git?branch=embassy-feature)",
+]
+
+[[package]]
 name = "mctp-echo"
 version = "0.1.0"
 dependencies = [
- "mctp 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "mctp 0.2.0 (git+https://github.com/9elements/mctp-rs.git?branch=embassy-feature)",
  "mctp-api",
  "userlib",
 ]
@@ -3881,12 +3894,26 @@ dependencies = [
 [[package]]
 name = "mctp-estack"
 version = "0.1.0"
-source = "git+https://github.com/embediver/mctp-rs.git?branch=embassy-feature#e061354835d47148ae1c379bdac1eacd0f2a5783"
+source = "git+https://github.com/9elements/mctp-rs.git?branch=embassy-feature#c632a6737ccbfbbe1d8382e40d2c2b9b90634f20"
 dependencies = [
  "crc",
  "heapless 0.8.0",
  "log",
- "mctp 0.2.0 (git+https://github.com/embediver/mctp-rs.git?branch=embassy-feature)",
+ "mctp 0.2.0 (git+https://github.com/9elements/mctp-rs.git?branch=embassy-feature)",
+ "smbus-pec",
+ "uuid",
+]
+
+[[package]]
+name = "mctp-estack"
+version = "0.1.0"
+source = "git+https://github.com/9elements/mctp-rs.git?branch=leongross%2Fserial-sync#1cfde344b50bf47940a645e958408cba882b3b24"
+dependencies = [
+ "crc",
+ "embedded-io",
+ "heapless 0.8.0",
+ "log",
+ "mctp 0.2.0 (git+https://github.com/9elements/mctp-rs.git?branch=leongross%2Fserial-sync)",
  "smbus-pec",
  "uuid",
 ]
@@ -3899,9 +3926,10 @@ dependencies = [
  "hubpack",
  "idol",
  "idol-runtime",
- "mctp 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "mctp 0.2.0 (git+https://github.com/9elements/mctp-rs.git?branch=embassy-feature)",
  "mctp-api",
- "mctp-estack",
+ "mctp-baremetal",
+ "mctp-estack 0.1.0 (git+https://github.com/9elements/mctp-rs.git?branch=leongross%2Fserial-sync)",
  "num-traits",
  "serde",
  "userlib",
