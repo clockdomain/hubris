@@ -2011,6 +2011,8 @@ dependencies = [
  "embedded-hal 0.2.6",
  "fixedmap",
  "heapless 0.7.17",
+ "openprot-hal-blocking 0.1.0 (git+https://github.com/rusty1968/openprot.git?branch=i2c-hardware)",
+ "openprot-platform-mock",
  "ringbuf",
  "userlib",
  "zerocopy 0.8.27",

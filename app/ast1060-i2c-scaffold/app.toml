@@ -28,7 +28,6 @@ name = "drv-mock-i2c"
 priority = 3
 max-sizes = {flash = 16384, ram = 4096}
 start = true
-features = ["mock-only"]
 stacksize = 2048
 notifications = ["i2c-irq"]
 

@@ -6,13 +6,16 @@
 #![no_main]
 
 use drv_i2c_api::*;
-use drv_i2c_types::{traits::I2cHardware, Op, ResponseCode};
+use drv_i2c_types::{traits::I2cHardware, Op, ResponseCode, SlaveConfig};
 
 use userlib::{hl, LeaseAttributes};
 use ringbuf::*;
 
-mod mock_driver;
-use mock_driver::MockI2cDriver;
+mod openprot_adapter;
+use openprot_platform_mock::i2c_hardware::MockI2cHardware;
+use openprot_adapter::OpenProtI2cAdapter;
+
+mod types;
 
 #[derive(Copy, Clone, PartialEq, Count)]
 enum Trace {
@@ -28,8 +31,11 @@ counted_ringbuf!(Trace, 64, Trace::None);
 
 #[export_name = "main"]
 fn main() -> ! {
-    // Create Mock I2C driver on the stack for IPC testing
-    let mut driver = MockI2cDriver::new();
+    // Create OpenPRoT I2C adapter for embedded I2C operations
+    let mut driver = {
+        let mock_hardware = MockI2cHardware::new();
+        OpenProtI2cAdapter::new(drv_i2c_api::Controller::I2C0, mock_hardware) // Default controller
+    };
     
     // Optional: Configure driver for specific test scenarios
     // Example: driver.set_device_response(Controller::I2C0, 0x50, &[0x12, 0x34]).ok();
@@ -162,7 +168,7 @@ fn main() -> ! {
                     .fixed::<[u8; 4], usize>()
                     .ok_or(ResponseCode::BadArg)?;
 
-                let (_address, controller, _port, _segment) = Marshal::unmarshal(payload)?;
+                let (_address, _controller, _port, _segment) = Marshal::unmarshal(payload)?;
                 
                 // Check for slave messages - for now just return count
                 // A full implementation would need to handle message data formatting

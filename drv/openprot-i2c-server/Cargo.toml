@@ -23,10 +23,9 @@ counters = { path = "../../lib/counters" }
 userlib = { path = "../../sys/userlib" }
 fixedmap = { path = "../../lib/fixedmap" }
 
-[features]
-default = ["mock-only"]
-mock-only = []
-hardware = []  # Enable this for real hardware builds
+## OpenPRot
+openprot-hal-blocking.workspace = true
+openprot-platform-mock.workspace = true
 
 [build-dependencies]
 build-util = { path = "../../build/util" }
