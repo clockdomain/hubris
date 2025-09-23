@@ -34,7 +34,7 @@ aspeed-ddk = { workspace = true, optional = true }
 build-util = { path = "../../build/util" }
 
 [features]
-default = ["mock"]
+default = ["ast1060"]
 ast1060 = ["aspeed-ddk"]
 i2c_target = ["aspeed-ddk/i2c_target"]
 mock = ["openprot-platform-mock"] # Keep for testing

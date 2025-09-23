@@ -7,6 +7,7 @@
 use drv_i2c_api::Controller;
 use drv_i2c_types::{ResponseCode, SlaveConfig, SlaveMessage};
 use drv_i2c_types::traits::{I2cHardware, I2cSpeed, SlaveStatus};
+#[cfg(feature = "mock")]
 use openprot_platform_mock::i2c_hardware::{MockI2cHardware, MockI2cError};
 use openprot_hal_blocking::i2c_hardware::{
     I2cHardwareCore, I2cMaster, I2cSlaveCore, I2cSlaveBuffer, I2cSlaveInterrupts
@@ -382,9 +383,11 @@ mod tests {
 }
 
 /// Type alias for the most common case: adapter with MockI2cHardware
+#[cfg(feature = "mock")]
 pub type MockI2cAdapter = OpenProtI2cAdapter<MockI2cHardware>;
 
 /// Specialized implementation for MockI2cHardware with proper error conversion
+#[cfg(feature = "mock")]
 impl OpenProtI2cAdapter<MockI2cHardware> {
     /// Convert MockI2cError to Hubris ResponseCode
     fn convert_error(err: MockI2cError) -> ResponseCode {
