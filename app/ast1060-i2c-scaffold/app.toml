@@ -26,9 +26,9 @@ start = true
 [tasks.i2c]
 name = "drv-mock-i2c"
 priority = 3
-max-sizes = {flash = 16384, ram = 4096}
+max-sizes = {flash = 16384, ram = 8192}
 start = true
-stacksize = 2048
+stacksize = 5120
 notifications = ["i2c-irq"]
 
 [tasks.i2c_client]

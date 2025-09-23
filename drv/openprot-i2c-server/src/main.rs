@@ -15,7 +15,57 @@ mod openprot_adapter;
 use openprot_platform_mock::i2c_hardware::MockI2cHardware;
 use openprot_adapter::OpenProtI2cAdapter;
 
-mod types;
+/// I2C Controller wrapper for slice-based management
+/// 
+/// This follows the same pattern as STM32xx I2C server for consistency
+/// and memory efficiency, while maintaining generic hardware support.
+struct I2cController<H>
+where
+    H: openprot_hal_blocking::i2c_hardware::I2cHardwareCore 
+        + openprot_hal_blocking::i2c_hardware::I2cMaster 
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveCore 
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveBuffer 
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveInterrupts,
+{
+    controller: Controller,
+    adapter: OpenProtI2cAdapter<H>,
+}
+
+impl<H> I2cController<H>
+where
+    H: openprot_hal_blocking::i2c_hardware::I2cHardwareCore 
+        + openprot_hal_blocking::i2c_hardware::I2cMaster 
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveCore 
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveBuffer 
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveInterrupts,
+{
+    fn new(controller: Controller, hardware: H) -> Self {
+        let adapter = OpenProtI2cAdapter::new(controller, hardware);
+        
+        Self {
+            controller,
+            adapter,
+        }
+    }
+}
+
+/// Lookup a controller by ID, similar to STM32xx pattern
+fn lookup_controller<H>(
+    controllers: &mut [I2cController<H>],
+    controller: Controller,
+) -> Result<&mut I2cController<H>, ResponseCode>
+where
+    H: openprot_hal_blocking::i2c_hardware::I2cHardwareCore 
+        + openprot_hal_blocking::i2c_hardware::I2cMaster 
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveCore 
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveBuffer 
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveInterrupts,
+{
+    controllers
+        .iter_mut()
+        .find(|c| c.controller == controller)
+        .ok_or(ResponseCode::BadController)
+}
 
 #[derive(Copy, Clone, PartialEq, Count)]
 enum Trace {
@@ -31,14 +81,18 @@ counted_ringbuf!(Trace, 64, Trace::None);
 
 #[export_name = "main"]
 fn main() -> ! {
-    // Create OpenPRoT I2C adapter for embedded I2C operations
-    let mut driver = {
-        let mock_hardware = MockI2cHardware::new();
-        OpenProtI2cAdapter::new(drv_i2c_api::Controller::I2C0, mock_hardware) // Default controller
-    };
-    
-    // Optional: Configure driver for specific test scenarios
-    // Example: driver.set_device_response(Controller::I2C0, 0x50, &[0x12, 0x34]).ok();
+    // Create controllers array - using slice approach like STM32xx
+    // but with generic hardware support and maximum controller instances
+    let mut controllers = [
+        I2cController::new(Controller::I2C0, MockI2cHardware::new()),
+        I2cController::new(Controller::I2C1, MockI2cHardware::new()),
+        I2cController::new(Controller::I2C2, MockI2cHardware::new()),
+        I2cController::new(Controller::I2C3, MockI2cHardware::new()),
+        I2cController::new(Controller::I2C4, MockI2cHardware::new()),
+        I2cController::new(Controller::I2C5, MockI2cHardware::new()),
+        I2cController::new(Controller::I2C6, MockI2cHardware::new()),
+        I2cController::new(Controller::I2C7, MockI2cHardware::new()),
+    ];
 
     // Field messages
     let mut buffer = [0; 4];
@@ -57,7 +111,10 @@ fn main() -> ! {
                 }
 
                 // For mock mode, we use the standard marshal format but ignore complex topology
-                let (addr, controller, _port, _mux) = Marshal::unmarshal(payload)?;
+                let (addr, controller_id, _port, _mux) = Marshal::unmarshal(payload)?;
+
+                // Lookup the controller using slice approach
+                let controller = lookup_controller(&mut controllers, controller_id)?;
 
                 let mut total = 0;
 
@@ -94,15 +151,15 @@ fn main() -> ! {
 
                     // Perform the I2C transaction
                     let bytes_read = if op == Op::WriteReadBlock {
-                        driver.write_read_block(
-                            controller,
+                        controller.adapter.write_read_block(
+                            controller_id,
                             addr,
                             &write_data[..winfo.len],
                             read_slice,
                         )?
                     } else {
-                        driver.write_read(
-                            controller,
+                        controller.adapter.write_read(
+                            controller_id,
                             addr,
                             &write_data[..winfo.len],
                             read_slice,
@@ -126,14 +183,17 @@ fn main() -> ! {
                     .fixed::<[u8; 4], usize>()
                     .ok_or(ResponseCode::BadArg)?;
 
-                let (slave_address, controller, port, _segment) = Marshal::unmarshal(payload)?;
+                let (slave_address, controller_id, port, _segment) = Marshal::unmarshal(payload)?;
+                
+                // Lookup the controller
+                let controller = lookup_controller(&mut controllers, controller_id)?;
                 
                 // Create slave configuration  
-                let config = SlaveConfig::new(controller, port, slave_address)
+                let config = SlaveConfig::new(controller_id, port, slave_address)
                     .map_err(|_| ResponseCode::BadArg)?;
                 
                 // Configure slave mode on hardware
-                driver.configure_slave_mode(controller, &config)?;
+                controller.adapter.configure_slave_mode(controller_id, &config)?;
                 
                 caller.reply(0usize);
                 Ok(())
@@ -144,9 +204,12 @@ fn main() -> ! {
                     .fixed::<[u8; 4], usize>()
                     .ok_or(ResponseCode::BadArg)?;
 
-                let (_address, controller, _port, _segment) = Marshal::unmarshal(payload)?;
+                let (_address, controller_id, _port, _segment) = Marshal::unmarshal(payload)?;
                 
-                driver.enable_slave_receive(controller)?;
+                // Lookup the controller
+                let controller = lookup_controller(&mut controllers, controller_id)?;
+                
+                controller.adapter.enable_slave_receive(controller_id)?;
                 caller.reply(0usize);
                 Ok(())
             }
@@ -156,9 +219,12 @@ fn main() -> ! {
                     .fixed::<[u8; 4], usize>()
                     .ok_or(ResponseCode::BadArg)?;
 
-                let (_address, controller, _port, _segment) = Marshal::unmarshal(payload)?;
+                let (_address, controller_id, _port, _segment) = Marshal::unmarshal(payload)?;
                 
-                driver.disable_slave_receive(controller)?;
+                // Lookup the controller
+                let controller = lookup_controller(&mut controllers, controller_id)?;
+                
+                controller.adapter.disable_slave_receive(controller_id)?;
                 caller.reply(0usize);
                 Ok(())
             }

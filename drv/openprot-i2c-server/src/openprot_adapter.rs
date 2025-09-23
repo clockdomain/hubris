@@ -129,9 +129,49 @@ where
     ) -> Result<usize, Self::Error> {
         self.transaction_count += 1;
         
-        // For now, delegate to regular write_read
-        // A full implementation would handle SMBus block read protocol
-        self.write_read(_controller, addr, write_data, read_buffer)
+        // Implement proper SMBus block read protocol
+        // SMBus block read: Send command, then read byte count + data
+        
+        if write_data.is_empty() {
+            return Err(ResponseCode::BadArg);
+        }
+        
+        // Step 1: Send the command byte(s) to the device
+        // Step 2: Perform block read - device will return [byte_count][data...]
+        let mut temp_buffer = [0u8; 33]; // SMBus max is 32 + 1 for count
+        
+        match self.inner.write_read(addr, write_data, &mut temp_buffer) {
+            Ok(_) => {
+                // Step 3: Parse SMBus block response
+                if temp_buffer.is_empty() {
+                    return Ok(0);
+                }
+                
+                // First byte is the count of data bytes that follow
+                let byte_count = temp_buffer[0] as usize;
+                
+                // Validate the count
+                if byte_count == 0 {
+                    return Ok(0);
+                }
+                
+                if byte_count > 32 {
+                    // SMBus spec limits block transfers to 32 bytes
+                    return Err(ResponseCode::TooMuchData);
+                }
+                
+                if byte_count > read_buffer.len() {
+                    // Caller's buffer is too small
+                    return Err(ResponseCode::TooMuchData);
+                }
+                
+                // Step 4: Copy the actual data (skip the count byte)
+                read_buffer[..byte_count].copy_from_slice(&temp_buffer[1..byte_count + 1]);
+                
+                Ok(byte_count)
+            },
+            Err(_) => Err(ResponseCode::BadDeviceState), // Generic error for unknown hardware
+        }
     }
 
     fn configure_timing(
@@ -223,49 +263,6 @@ where
             bus_errors: if openprot_status.error { 1 } else { 0 },
             buffer_full: openprot_status.rx_buffer_count >= 256,
         })
-    }
-}
-
-// Implement I2cControllerOperations trait so it can be used with I2cControllerManager
-impl<H> crate::types::I2cControllerOperations for OpenProtI2cAdapter<H>
-where
-    H: I2cHardwareCore + I2cMaster + I2cSlaveCore + I2cSlaveBuffer + I2cSlaveInterrupts,
-{
-    type Error = ResponseCode;
-    
-    fn write_read(
-        &mut self,
-        addr: u8,
-        write_data: &[u8],
-        read_buffer: &mut [u8],
-    ) -> Result<usize, Self::Error> {
-        // Call the I2cHardware trait method but ignore the controller parameter
-        // since the adapter is already bound to a specific controller
-        I2cHardware::write_read(self, self.controller_id, addr, write_data, read_buffer)
-    }
-    
-    fn write_read_block(
-        &mut self,
-        addr: u8,
-        write_data: &[u8],
-        read_buffer: &mut [u8],
-    ) -> Result<usize, Self::Error> {
-        I2cHardware::write_read_block(self, self.controller_id, addr, write_data, read_buffer)
-    }
-    
-    fn configure_slave_mode(
-        &mut self,
-        config: &drv_i2c_types::SlaveConfig,
-    ) -> Result<(), Self::Error> {
-        I2cHardware::configure_slave_mode(self, self.controller_id, config)
-    }
-    
-    fn enable_slave_receive(&mut self) -> Result<(), Self::Error> {
-        I2cHardware::enable_slave_receive(self, self.controller_id)
-    }
-    
-    fn disable_slave_receive(&mut self) -> Result<(), Self::Error> {
-        I2cHardware::disable_slave_receive(self, self.controller_id)
     }
 }
 
