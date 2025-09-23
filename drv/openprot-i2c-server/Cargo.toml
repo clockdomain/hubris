@@ -25,10 +25,19 @@ fixedmap = { path = "../../lib/fixedmap" }
 
 ## OpenPRot
 openprot-hal-blocking.workspace = true
-openprot-platform-mock.workspace = true
+openprot-platform-mock = { workspace = true, optional = true }
+
+## ASPEED DDK
+aspeed-ddk = { workspace = true, optional = true }
 
 [build-dependencies]
 build-util = { path = "../../build/util" }
+
+[features]
+default = ["mock"]
+ast1060 = ["aspeed-ddk"]
+i2c_target = ["aspeed-ddk/i2c_target"]
+mock = ["openprot-platform-mock"] # Keep for testing
 
 [lints]
 workspace = true

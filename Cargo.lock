@@ -158,7 +158,7 @@ checksum = "96d30a06541fbafbc7f82ed10c06164cfbd2c401138f6addd8404629c4b16711"
 [[package]]
 name = "aspeed-ddk"
 version = "0.1.0"
-source = "git+https://github.com/aspeedtech-bmc/aspeed-rust.git#af384a3e90f23da4ce175d4fd29e73e06de104c7"
+source = "git+https://github.com/rusty1968/aspeed-rust.git?branch=aspeed-ddk-i2c-refactor#9767d7a7c02c8e3e006c6c00e281114d3f3a3580"
 dependencies = [
  "ast1060-pac",
  "cortex-m",
@@ -170,7 +170,8 @@ dependencies = [
  "heapless 0.8.0",
  "hex-literal",
  "nb 1.1.0",
- "openprot-hal-blocking 0.1.0 (git+https://github.com/OpenPRoT/openprot)",
+ "openprot-hal-blocking 0.1.0 (git+https://github.com/rusty1968/openprot.git?rev=289bde2041eb8534364803dd7406470bce5338de)",
+ "openprot-hal-nb",
  "panic-halt 1.0.0",
  "paste",
  "proposed-traits",
@@ -2002,6 +2003,7 @@ dependencies = [
 name = "drv-mock-i2c"
 version = "0.1.0"
 dependencies = [
+ "aspeed-ddk",
  "bitfield 0.13.2",
  "build-util",
  "cortex-m",
@@ -2969,6 +2971,16 @@ name = "embedded-hal"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+
+[[package]]
+name = "embedded-hal-nb"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fba4268c14288c828995299e59b12babdbe170f6c6d73731af1b4648142e8605"
+dependencies = [
+ "embedded-hal 1.0.0",
+ "nb 1.1.0",
+]
 
 [[package]]
 name = "embedded-io"
@@ -4320,13 +4332,24 @@ dependencies = [
 [[package]]
 name = "openprot-hal-blocking"
 version = "0.1.0"
-source = "git+https://github.com/OpenPRoT/openprot#2c2a8760a5b22ab25c9bc867799d488fa3033688"
+source = "git+https://github.com/rusty1968/openprot.git?rev=289bde2041eb8534364803dd7406470bce5338de#289bde2041eb8534364803dd7406470bce5338de"
 dependencies = [
  "embedded-hal 1.0.0",
  "rand_core 0.9.3",
  "subtle",
  "zerocopy 0.8.27",
  "zeroize",
+]
+
+[[package]]
+name = "openprot-hal-nb"
+version = "0.1.0"
+source = "git+https://github.com/rusty1968/openprot.git?rev=289bde2041eb8534364803dd7406470bce5338de#289bde2041eb8534364803dd7406470bce5338de"
+dependencies = [
+ "embedded-hal 1.0.0",
+ "embedded-hal-nb",
+ "nb 1.1.0",
+ "openprot-hal-blocking 0.1.0 (git+https://github.com/rusty1968/openprot.git?rev=289bde2041eb8534364803dd7406470bce5338de)",
 ]
 
 [[package]]
