@@ -3,12 +3,54 @@
 # Hubris QEMU I2C Scaffold App Runner
 # This script runs the AST1060 I2C scaffold app in QEMU with GDB debugging enabled
 # The app includes a mock I2C server, I2C client test task, and UART driver
+#
+# Usage:
+#   ./run-qemu-i2c-scaffold-app.sh [--build] [--toml=<path>]
+#
+#   --build      Build the firmware before running
+#   --toml=<path> Specify app.toml file (default: app/ast1060-i2c-scaffold/app.toml)
 
 set -e
 
-# Configuration
+# Default configuration
 APP_NAME="ast1060-i2c-scaffold"
 IMAGE_NAME="default"
+BUILD_FLAG=false
+TOML_FILE="app/ast1060-i2c-scaffold/app.toml"
+
+# Parse command line arguments
+for arg in "$@"; do
+    case $arg in
+        --build)
+            BUILD_FLAG=true
+            shift
+            ;;
+        --toml=*)
+            TOML_FILE="${arg#*=}"
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--build] [--toml=<path>]"
+            echo ""
+            echo "Options:"
+            echo "  --build         Build the firmware before running"
+            echo "  --toml=<path>   Specify app.toml file (default: app/ast1060-i2c-scaffold/app.toml)"
+            echo "  -h, --help      Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  $0                                              # Run with existing firmware"
+            echo "  $0 --build                                     # Build and run default app.toml"
+            echo "  $0 --build --toml=app/ast1060-i2c-scaffold/app-mock.toml  # Build and run mock configuration"
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $arg"
+            echo "Use -h or --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
 BUILD_DIR="target/${APP_NAME}/dist/${IMAGE_NAME}"
 FIRMWARE_PATH="${BUILD_DIR}/final.bin"
 
@@ -27,16 +69,35 @@ echo -e "  • UART Driver (for debug output)"
 echo -e "  • System Tasks (jefe, idle)"
 echo ""
 
+# Build firmware if requested
+if [ "$BUILD_FLAG" = true ]; then
+    echo -e "${BLUE}Building firmware...${NC}"
+    echo -e "${GREEN}Using TOML file: $TOML_FILE${NC}"
+    echo ""
+
+    if [ ! -f "$TOML_FILE" ]; then
+        echo -e "${RED}Error: TOML file not found: $TOML_FILE${NC}"
+        exit 1
+    fi
+
+    echo "Running: cargo xtask dist $TOML_FILE"
+    cargo xtask dist "$TOML_FILE"
+    echo ""
+fi
+
 # Check if firmware exists
 if [ ! -f "$FIRMWARE_PATH" ]; then
     echo -e "${RED}Error: Firmware not found at $FIRMWARE_PATH${NC}"
     echo -e "${YELLOW}Please build the firmware first with:${NC}"
-    echo "  cargo xtask dist app/${APP_NAME}/app.toml"
+    echo "  cargo xtask dist $TOML_FILE"
+    echo -e "${YELLOW}Or use the --build flag:${NC}"
+    echo "  $0 --build --toml=$TOML_FILE"
     exit 1
 fi
 
 echo -e "${GREEN}Found firmware: $FIRMWARE_PATH${NC}"
 echo -e "${GREEN}Build directory: $BUILD_DIR${NC}"
+echo -e "${GREEN}TOML file used: $TOML_FILE${NC}"
 
 # Check if script.gdb exists
 GDB_SCRIPT_PATH="${BUILD_DIR}/script.gdb"
