@@ -158,7 +158,7 @@ checksum = "96d30a06541fbafbc7f82ed10c06164cfbd2c401138f6addd8404629c4b16711"
 [[package]]
 name = "aspeed-ddk"
 version = "0.1.0"
-source = "git+https://github.com/rusty1968/aspeed-rust.git?branch=aspeed-ddk-i2c-refactor#9767d7a7c02c8e3e006c6c00e281114d3f3a3580"
+source = "git+https://github.com/rusty1968/aspeed-rust.git?branch=main#9a1bffe32c0ff58f2068babd25242d836c75a308"
 dependencies = [
  "ast1060-pac",
  "cortex-m",

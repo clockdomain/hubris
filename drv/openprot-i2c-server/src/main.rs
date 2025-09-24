@@ -6,7 +6,7 @@
 #![no_main]
 
 use drv_i2c_api::*;
-use drv_i2c_types::{traits::I2cHardware, Op, ResponseCode};
+use drv_i2c_types::{Op, ResponseCode, traits::I2cHardware};
 
 use userlib::{hl, LeaseAttributes};
 use ringbuf::*;
@@ -19,35 +19,43 @@ use openprot_platform_mock::i2c_hardware::MockI2cHardware;
 #[cfg(feature = "ast1060")]
 use aspeed_ddk::i2c::hardware_instantiation::{I2cControllerWrapper, instantiate_hardware};
 
+// Static storage for AST1060 controllers
+#[cfg(feature = "ast1060")]
+static mut AST1060_CONTROLLERS: Option<[I2cControllerWrapper<'static>; 13]> = None;
+#[cfg(feature = "ast1060")]
+static CONTROLLERS_INIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 use openprot_adapter::OpenProtI2cAdapter;
 
+#[cfg(feature = "mock")]
 /// I2C Controller wrapper for slice-based management
-/// 
+///
 /// This follows the same pattern as STM32xx I2C server for consistency
 /// and memory efficiency, while maintaining generic hardware support.
 struct I2cController<H>
 where
-    H: openprot_hal_blocking::i2c_hardware::I2cHardwareCore 
-        + openprot_hal_blocking::i2c_hardware::I2cMaster 
-        + openprot_hal_blocking::i2c_hardware::I2cSlaveCore 
-        + openprot_hal_blocking::i2c_hardware::I2cSlaveBuffer 
+    H: openprot_hal_blocking::i2c_hardware::I2cHardwareCore
+        + openprot_hal_blocking::i2c_hardware::I2cMaster
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveCore
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveBuffer
         + openprot_hal_blocking::i2c_hardware::I2cSlaveInterrupts,
 {
     controller: Controller,
     adapter: OpenProtI2cAdapter<H>,
 }
 
+#[cfg(feature = "mock")]
 impl<H> I2cController<H>
 where
-    H: openprot_hal_blocking::i2c_hardware::I2cHardwareCore 
-        + openprot_hal_blocking::i2c_hardware::I2cMaster 
-        + openprot_hal_blocking::i2c_hardware::I2cSlaveCore 
-        + openprot_hal_blocking::i2c_hardware::I2cSlaveBuffer 
+    H: openprot_hal_blocking::i2c_hardware::I2cHardwareCore
+        + openprot_hal_blocking::i2c_hardware::I2cMaster
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveCore
+        + openprot_hal_blocking::i2c_hardware::I2cSlaveBuffer
         + openprot_hal_blocking::i2c_hardware::I2cSlaveInterrupts,
 {
     fn new(controller: Controller, hardware: H) -> Self {
         let adapter = OpenProtI2cAdapter::new(controller, hardware);
-        
+
         Self {
             controller,
             adapter,
@@ -55,6 +63,7 @@ where
     }
 }
 
+#[cfg(feature = "mock")]
 /// Lookup a controller by ID - works with any hardware implementing OpenProt HAL traits
 fn lookup_controller<H>(
     controllers: &mut [I2cController<H>],
@@ -71,6 +80,21 @@ where
         .iter_mut()
         .find(|c| c.controller == controller)
         .ok_or(ResponseCode::BadController)
+}
+
+/// Get static AST1060 controllers with proper lifetime
+#[cfg(feature = "ast1060")]
+fn get_ast1060_controllers() -> &'static mut [I2cControllerWrapper<'static>; 13] {
+    if !CONTROLLERS_INIT.load(core::sync::atomic::Ordering::Acquire) {
+        unsafe {
+            AST1060_CONTROLLERS = Some(instantiate_hardware());
+            CONTROLLERS_INIT.store(true, core::sync::atomic::Ordering::Release);
+        }
+    }
+
+    unsafe {
+        AST1060_CONTROLLERS.as_mut().unwrap()
+    }
 }
 
 /// Get AST1060 controller index by ID
@@ -135,8 +159,7 @@ fn main() -> ! {
         I2cController::new(Controller::I2C7, MockI2cHardware::new()),
     ];
 
-    #[cfg(feature = "ast1060")]
-    let mut controllers = instantiate_hardware();
+    // Controllers are now managed via static storage for AST1060
 
     // Field messages
     let mut buffer = [0; 4];
@@ -156,13 +179,6 @@ fn main() -> ! {
 
                 // For mock mode, we use the standard marshal format but ignore complex topology
                 let (addr, controller_id, _port, _mux) = Marshal::unmarshal(payload)?;
-
-                // Lookup the controller using appropriate approach based on feature
-                #[cfg(feature = "mock")]
-                let controller = lookup_controller(&mut controllers, controller_id)?;
-
-                #[cfg(feature = "ast1060")]
-                let controller = lookup_ast1060_controller(&mut controllers, controller_id)?;
 
                 let mut total = 0;
 
@@ -197,45 +213,64 @@ fn main() -> ! {
                     let mut read_buffer = [0u8; 255];
                     let read_slice = &mut read_buffer[..rinfo.len];
 
-                    // Perform the I2C transaction
-                    #[cfg(feature = "mock")]
-                    let bytes_read = if op == Op::WriteReadBlock {
-                        controller.adapter.write_read_block(
-                            controller_id,
-                            addr,
-                            &write_data[..winfo.len],
-                            read_slice,
-                        )?
-                    } else {
-                        controller.adapter.write_read(
-                            controller_id,
-                            addr,
-                            &write_data[..winfo.len],
-                            read_slice,
-                        )?
-                    };
-
-                    #[cfg(feature = "ast1060")]
-                    let bytes_read = if op == Op::WriteReadBlock {
-                        // For block operations, use write_read
-                        controller.as_i2c_mut()
-                            .write_read(addr, &write_data[..winfo.len], read_slice)
-                            .map_err(map_i2c_error)?;
-
-                        // For SMBus block reads, first byte contains length
-                        if !read_slice.is_empty() && winfo.len > 0 {
-                            let block_length = read_slice[0] as usize;
-                            block_length.min(read_slice.len().saturating_sub(1))
-                        } else {
-                            rinfo.len
+                    // Perform the I2C transaction with appropriate controller
+                    let bytes_read = match (cfg!(feature = "mock"), cfg!(feature = "ast1060")) {
+                        (true, false) => {
+                            #[cfg(feature = "mock")]
+                            {
+                                let controller = lookup_controller(&mut controllers, controller_id)?;
+                                if op == Op::WriteReadBlock {
+                                    controller.adapter.write_read_block(
+                                        controller_id,
+                                        addr,
+                                        &write_data[..winfo.len],
+                                        read_slice,
+                                    )?
+                                } else {
+                                    controller.adapter.write_read(
+                                        controller_id,
+                                        addr,
+                                        &write_data[..winfo.len],
+                                        read_slice,
+                                    )?
+                                }
+                            }
+                            #[cfg(not(feature = "mock"))]
+                            unreachable!()
                         }
-                    } else {
-                        // For regular write_read, embedded-hal returns () on success
-                        controller.as_i2c_mut()
-                            .write_read(addr, &write_data[..winfo.len], read_slice)
-                            .map_err(map_i2c_error)?;
-                        // Return the full buffer length since embedded-hal fills the entire buffer
-                        rinfo.len
+                        (false, true) => {
+                            #[cfg(feature = "ast1060")]
+                            {
+                                let index = get_ast1060_controller_index(controller_id)?;
+                                let controllers = get_ast1060_controllers();
+                                let controller = &mut controllers[index];
+
+                                if op == Op::WriteReadBlock {
+                                    // For block operations, use write_read
+                                    controller.as_i2c_mut()
+                                        .write_read(addr, &write_data[..winfo.len], read_slice)
+                                        .map_err(map_i2c_error)?;
+
+                                    // For SMBus block reads, first byte contains length
+                                    if !read_slice.is_empty() && winfo.len > 0 {
+                                        let block_length = read_slice[0] as usize;
+                                        block_length.min(read_slice.len().saturating_sub(1))
+                                    } else {
+                                        rinfo.len
+                                    }
+                                } else {
+                                    // For regular write_read, embedded-hal returns () on success
+                                    controller.as_i2c_mut()
+                                        .write_read(addr, &write_data[..winfo.len], read_slice)
+                                        .map_err(map_i2c_error)?;
+                                    // Return the full buffer length since embedded-hal fills the entire buffer
+                                    rinfo.len
+                                }
+                            }
+                            #[cfg(not(feature = "ast1060"))]
+                            unreachable!()
+                        }
+                        _ => return Err(ResponseCode::NotImplemented),
                     };
 
                     // Write read data back to lease
@@ -268,17 +303,17 @@ fn main() -> ! {
 
                 #[cfg(feature = "ast1060")]
                 {
-                    let controller = lookup_ast1060_controller(&mut controllers, controller_id)?;
+                    let index = get_ast1060_controller_index(controller_id)?;
+                    let controllers = get_ast1060_controllers();
+                    let controller = &mut controllers[index];
 
                     // Use hardware-specific slave functionality if available
                     #[cfg(feature = "i2c_target")]
                     {
-                        if let Some(hardware) = controller.get_hardware_mut()
-                            .downcast_mut::<aspeed_ddk::i2c::i2c_controller::I2cController<_>>()
-                        {
-                            // Configure slave address using hardware-specific methods
-                            // This would need the actual hardware interface - placeholder for now
-                        }
+                        // Use the wrapper's built-in slave configuration if available
+                        // This avoids the lifetime issues in get_hardware_mut()
+                        // For now, assume slave configuration succeeds
+                        // TODO: Implement proper slave address configuration when aspeed-ddk is fixed
                     }
 
                     #[cfg(not(feature = "i2c_target"))]
@@ -307,8 +342,21 @@ fn main() -> ! {
 
                 #[cfg(feature = "ast1060")]
                 {
-                    let _controller = lookup_ast1060_controller(&mut controllers, controller_id)?;
-                    // TODO: Implement slave functionality for AST1060
+                    let index = get_ast1060_controller_index(controller_id)?;
+                    let controllers = get_ast1060_controllers();
+                    let controller = &mut controllers[index];
+
+                    #[cfg(feature = "i2c_target")]
+                    {
+                        // Use the wrapper's built-in slave enable if available
+                        // For now, assume slave enable succeeds
+                        // TODO: Implement proper slave enable when aspeed-ddk is fixed
+                    }
+
+                    #[cfg(not(feature = "i2c_target"))]
+                    {
+                        return Err(ResponseCode::OperationNotSupported);
+                    }
                 }
                 caller.reply(0usize);
                 Ok(())
@@ -330,8 +378,21 @@ fn main() -> ! {
 
                 #[cfg(feature = "ast1060")]
                 {
-                    let _controller = lookup_ast1060_controller(&mut controllers, controller_id)?;
-                    // TODO: Implement slave functionality for AST1060
+                    let index = get_ast1060_controller_index(controller_id)?;
+                    let controllers = get_ast1060_controllers();
+                    let controller = &mut controllers[index];
+
+                    #[cfg(feature = "i2c_target")]
+                    {
+                        // Use the wrapper's built-in slave disable if available
+                        // For now, assume slave disable succeeds
+                        // TODO: Implement proper slave disable when aspeed-ddk is fixed
+                    }
+
+                    #[cfg(not(feature = "i2c_target"))]
+                    {
+                        return Err(ResponseCode::OperationNotSupported);
+                    }
                 }
                 caller.reply(0usize);
                 Ok(())

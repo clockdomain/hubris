@@ -207,6 +207,10 @@ pub enum ResponseCode {
     BadSlaveAddress,
     /// Slave mode configuration failed due to hardware limitations
     SlaveConfigurationFailed,
+    /// Operation timeout
+    Timeout,
+    /// Operation not implemented
+    NotImplemented,
 }
 
 ///
@@ -235,6 +239,14 @@ pub enum Controller {
     I2C5 = 5,
     I2C6 = 6,
     I2C7 = 7,
+    I2C8 = 8,
+    I2C9 = 9,
+    I2C10 = 10,
+    I2C11 = 11,
+    I2C12 = 12,
+    I2C13 = 13,
+    I2C14 = 14,
+    I2C15 = 15,
 }
 
 #[derive(Copy, Clone, Debug, FromPrimitive, Eq, PartialEq)]
