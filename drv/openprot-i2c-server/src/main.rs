@@ -30,9 +30,14 @@ counted_ringbuf!(Trace, 64, Trace::None);
 fn main() -> ! {
     // Create Mock I2C driver on the stack for IPC testing
     let mut driver = MockI2cDriver::new();
-    
-    // Optional: Configure driver for specific test scenarios
-    // Example: driver.set_device_response(Controller::I2C0, 0x50, &[0x12, 0x34]).ok();
+
+    // Configure driver for test scenarios
+    // Set up test device at address 0x50 with predictable response data
+    driver.set_device_response(Controller::I2C0, 0x50, &[0x12, 0x34, 0x56, 0x78]).ok();
+
+    // Configure additional test devices for comprehensive testing
+    driver.set_device_response(Controller::I2C1, 0x48, &[0xAA, 0xBB, 0xCC, 0xDD]).ok();
+    driver.set_device_response(Controller::I2C0, 0x60, &[0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA]).ok();
 
     // Field messages
     let mut buffer = [0; 4];
