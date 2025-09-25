@@ -38,10 +38,11 @@ Interface(
                 err: CLike("ServerError"),
             ),
         ),
-        "recv": (   // TODO Is one recv sufficient for listener and requests, or do we need two?
-            doc: "Receive a single message matched by the `Listener`",
+        "recv": (
+            doc: "Receive a single message, either a request matching the listener or a response to a request",
             args: {
                 "handle": "GenericHandle",
+                "timeout_millis": "u32",
             },
             leases: {
                 "buf": (type: "[u8]", write: true),
@@ -57,6 +58,7 @@ Interface(
             args: {
                 "handle": "GenericHandle",
                 "typ": "u8",
+                "eid": "Option<u8>",
                 "tag": "Option<u8>",
                 "ic": "bool",
             },

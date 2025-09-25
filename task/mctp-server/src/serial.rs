@@ -5,7 +5,7 @@ pub struct SerialSender;
 impl mctp_stack::Sender for SerialSender {
     fn send(
         &mut self,
-        fragmenter: mctp_stack::Fragmenter,
+        fragmenter: mctp_stack::fragment::Fragmenter,
         payload: &[u8],
     ) -> Result<mctp::Tag> {
         todo!()

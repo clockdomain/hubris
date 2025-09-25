@@ -21,7 +21,7 @@ fn main() -> ! {
     let stack = mctp_api::Stack::from(MCTP.get_task_id());
 
     stack.set_eid(Eid(8)).unwrap_lite();
-    let mut listener = stack.listener(MsgType(1)).unwrap_lite();
+    let mut listener = stack.listener(MsgType(1), None).unwrap_lite();
     let mut recv_buf = [0; 255];
 
     loop {

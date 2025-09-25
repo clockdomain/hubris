@@ -34,7 +34,8 @@ task-slots = ["mctp_server"]
 [tasks.mctp_server]
 name = "mctp-server"
 priority = 1
-max-sizes = {flash = 8192, ram = 8192}
+max-sizes = {flash = 16384, ram = 16384}
 start = true
-stacksize = 4096
+stacksize = 12288
+notifications = ["timer"]
 
