@@ -11,7 +11,7 @@ use zerocopy::IntoBytes;
 const MAX_PAYLOAD: usize = 1023;
 
 pub struct Server<S: mctp_stack::Sender, const OUTSTANDING: usize> {
-    stack: Router<S, { super::MAX_LISTENERS }, { super::MAX_REQUESTS }>,
+    pub stack: Router<S, { super::MAX_LISTENERS }, { super::MAX_REQUESTS }>,
     /// The currently outstanding recv calls
     ///
     /// Maps the handle to RecvMessage that must be replied to,
@@ -206,7 +206,10 @@ impl<S: mctp_stack::Sender, const OUTSTANDING: usize> Server<S, OUTSTANDING> {
         }
 
         // Else set the timer and return the deadline
-        return set_timer_relative(timeout_millis, crate::TIMER_NOTIFICATION);
+        return set_timer_relative(
+            timeout_millis,
+            super::notifications::TIMER_MASK,
+        );
     }
 }
 

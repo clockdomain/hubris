@@ -31,11 +31,13 @@ start = true
 stacksize = 2048
 task-slots = ["mctp_server"]
 
+# app/ast1060-starter/app.toml
 [tasks.mctp_server]
 name = "mctp-server"
 priority = 1
-max-sizes = {flash = 16384, ram = 16384}
+max-sizes = {flash = 32768, ram = 16384}
 start = true
 stacksize = 12288
-notifications = ["timer"]
+notifications = ["uart-irq", "timer"]
+interrupts = {"uart.irq" = "uart-irq"}
 

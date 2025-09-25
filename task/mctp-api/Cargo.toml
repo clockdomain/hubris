@@ -14,6 +14,7 @@ idol-runtime = { workspace = true }
 hubpack = { workspace = true }
 serde = { workspace = true }
 mctp = { workspace = true }
+lib-ast1060-uart = { path = "../../lib/ast1060-uart" }
 
 [build-dependencies]
 idol = { workspace = true }

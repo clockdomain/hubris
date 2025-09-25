@@ -5,14 +5,17 @@
 #![no_std]
 #![no_main]
 
+use ast1060_pac as device;
+use core::cell::RefCell;
+use core::ops::Deref;
+use mctp_stack;
 use userlib::*;
+
+use lib_ast1060_uart::Usart;
 
 mod serial;
 mod server;
-
 use server::Server;
-
-pub const TIMER_NOTIFICATION: u32 = 1;
 
 /// Maximum number of concurrent requests the server can handle.
 pub const MAX_REQUESTS: usize = 8;
@@ -21,19 +24,44 @@ pub const MAX_LISTENERS: usize = 8;
 /// Maximum number of concurrent outstanding receive calls.
 pub const MAX_OUTSTANDING: usize = 16;
 
+// TODO: add IRQ recv loop
 #[export_name = "main"]
 fn main() -> ! {
     let mut msg_buf = [0; ipc::INCOMING_SIZE];
+    let peripherals = unsafe { device::Peripherals::steal() };
+
+    let mut usart = RefCell::new(Usart::from(peripherals.uart.deref()));
+    let serial_sender = serial::SerialSender::new(&usart);
+    let mut serial_reader = mctp_stack::serial::MctpSerialHandler::new();
+
     let mut server: Server<_, MAX_OUTSTANDING> =
-        Server::new(mctp::Eid(42), 0, serial::SerialSender {});
+        Server::new(mctp::Eid(42), 0, serial_sender);
 
     loop {
-        let msg = sys_recv_open(&mut msg_buf, TIMER_NOTIFICATION);
-        if msg.sender == TaskId::KERNEL && msg.operation == TIMER_NOTIFICATION {
+        let msg = sys_recv_open(
+            &mut msg_buf,
+            notifications::UART_IRQ_MASK & notifications::TIMER_MASK,
+        );
+        let interrupt = usart.borrow_mut().read_interrupt_status();
+
+        if msg.sender == TaskId::KERNEL
+            && (msg.operation & notifications::UART_IRQ_MASK) != 0
+        {
+            let pkt =
+                serial::handle_recv(interrupt, &usart, &mut serial_reader)
+                    .unwrap_lite();
+            server.stack.inbound(pkt).unwrap_lite();
+            continue;
+        }
+
+        if msg.sender == TaskId::KERNEL
+            && (msg.operation & notifications::TIMER_MASK) != 0
+        {
             let state = sys_get_timer();
             server.update(state.now);
             continue;
         }
+
         handle_mctp_msg(&msg_buf, msg, &mut server);
     }
 }
@@ -109,3 +137,5 @@ fn handle_mctp_msg<S: mctp_stack::Sender, const OUTSTANDING: usize>(
         }
     }
 }
+
+include!(concat!(env!("OUT_DIR"), "/notifications.rs"));
