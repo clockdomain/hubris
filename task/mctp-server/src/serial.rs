@@ -32,7 +32,7 @@ impl<'a> mctp_stack::Sender for SerialSender<'a> {
 
             match r {
                 mctp_stack::fragment::SendOutput::Packet(p) => {
-                    self.serial_handler.send_sync(
+                    let _ = self.serial_handler.send_sync(
                         payload,
                         &mut self.usart.borrow_mut().deref_mut(),
                     );
