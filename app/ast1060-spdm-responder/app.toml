@@ -23,26 +23,23 @@ max-sizes = {flash = 128, ram = 256}
 stacksize = 256
 start = true
 
-[tasks.uart_driver]
-name = "drv-ast1060-uart"
-priority = 2
-max-sizes = {flash = 8192, ram = 2048}
-uses = ["uart"]
+# MCTP Server Task - handles physical transport via UART
+[tasks.mctp_server]
+name = "mctp-server"
+priority = 1
+max-sizes = {flash = 32768, ram = 16384}
 start = true
-notifications = ["uart-irq"]
+stacksize = 12288
+notifications = ["uart-irq", "timer"]
 interrupts = {"uart.irq" = "uart-irq"}
-# task-slots = ["rcc_driver"]
 
+# SPDM Responder Task - processes SPDM messages over MCTP
 [tasks.spdm_responder]
-name = "drv-spdm-responder-server"
+name = "spdm-resp"
 priority = 3
-max-sizes = {flash = 16384, ram = 4096}
+max-sizes = {flash = 24576, ram = 8192}
 start = true
+stacksize = 4096
+task-slots = ["mctp_server"]
 
-[tasks.helloworld]
-name = "task-helloworld"
-priority = 4
-max-sizes = {flash = 8192, ram = 2048}
-uses = ["uart"]
-start = true
-task-slots = ["uart_driver", "spdm_responder"]
+
