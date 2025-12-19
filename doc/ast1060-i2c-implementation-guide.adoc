@@ -1,0 +1,1134 @@
+= AST1060 I2C Driver Implementation Guide
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+== Overview
+
+This guide provides concrete recommendations for implementing the AST1060 I2C driver to work with the Hubris I2C API framework.
+
+**Current Status:**
+- ✅ Low-level hardware driver implemented ([drv/ast1060-i2c](../drv/ast1060-i2c))
+- ✅ Generic I2C server implemented ([drv/openprot-i2c-server](../drv/openprot-i2c-server))
+- ❌ I2cHardware trait implementation (missing)
+- ❌ Software message buffering for slave mode (missing)
+- ❌ Integration with server (missing)
+
+**Goal:** Bridge the gap between low-level hardware operations and the high-level I2C API.
+
+== Why an Adapter Layer?
+
+Before diving into implementation, it's important to understand **why** we need an adapter layer at all.
+
+=== The Architectural Mismatch
+
+==== What We Have: Per-Controller Driver
+
+The low-level AST1060 driver (`Ast1060I2c`) is designed with a clean, focused architecture where each instance manages **one controller**:
+
+[source,rust]
+----
+pub struct Ast1060I2c<'a> {
+    controller: &'a I2cController<'a>,  // Bound to ONE controller
+    xfer_mode: I2cXferMode,
+    multi_master: bool,
+    // ... state specific to this controller
+}
+
+// Usage: Create one instance per controller
+let i2c0 = Ast1060I2c::new(&i2c0_controller, config)?;
+let i2c1 = Ast1060I2c::new(&i2c1_controller, config)?;
+----
+
+**Design Benefits:**
+- Clear ownership: One instance owns one controller
+- Simple state management: No ambiguity about which hardware
+- Clean API: All methods operate on "this" controller
+- Reusable: Can be used standalone without framework
+
+==== What the Trait Expects: Multi-Controller Manager
+
+The `I2cHardware` trait used by the server framework expects **one object** to manage **all controllers**:
+
+[source,rust]
+----
+trait I2cHardware {
+    fn write_read(
+        &mut self,
+        controller: Controller,  // Which controller to use (I2C0-I2C13)
+        addr: u8,
+        write_data: &[u8],
+        read_buffer: &mut [u8],
+    ) -> Result<usize, Self::Error>;
+}
+
+// Server usage: ONE driver instance for ALL controllers
+let mut driver = SomeDriver::new();
+driver.write_read(Controller::I2C0, 0x50, ...)?;  // Use I2C0
+driver.write_read(Controller::I2C2, 0x60, ...)?;  // Use I2C2
+driver.write_read(Controller::I2C5, 0x70, ...)?;  // Use I2C5
+----
+
+**Design Benefits:**
+- Single entry point for server
+- Controller selection via parameter
+- Generic across hardware platforms
+- Simplifies IPC routing
+
+==== The Problem
+
+You **cannot** directly implement the trait on the low-level driver:
+
+[source,rust]
+----
+// This doesn't work!
+impl I2cHardware for Ast1060I2c<'_> {
+    fn write_read(&mut self, controller: Controller, ...) {
+        // Problem: self.controller is already bound to ONE controller
+        // What if controller != self.controller.controller?
+        // We'd need to access a DIFFERENT Ast1060I2c instance!
+        // But we only have access to `self`!
+        
+        if controller != self.controller.controller {
+            return Err(ResponseCode::BadController);
+            // Can't switch controllers - we're stuck with our bound controller!
+        }
+        
+        self.write(...) // Only works for our bound controller
+    }
+}
+----
+
+=== Solution: The Adapter Pattern
+
+The adapter layer bridges this architectural gap:
+
+[source,rust]
+----
+pub struct Ast1060I2cAdapter<'a> {
+    // Array of all 14 controllers
+    controllers: [Option<Ast1060I2c<'a>>; 14],
+    
+    // Per-controller slave state (not part of hardware driver)
+    slave_states: [SlaveState; 14],
+}
+
+impl I2cHardware for Ast1060I2cAdapter<'_> {
+    fn write_read(&mut self, controller: Controller, ...) {
+        // Route to the correct controller instance
+        let i2c = self.get_controller_mut(controller)?;
+        i2c.write(addr, write_data)?;
+        i2c.read(addr, read_buffer)?;
+        Ok(read_buffer.len())
+    }
+}
+----
+
+**The adapter provides:**
+
+1. **Controller Routing**: Selects the right `Ast1060I2c` instance based on `Controller` enum
+2. **Software Buffering**: Adds slave message queues (hardware has no FIFO)
+3. **State Management**: Tracks per-controller slave configuration and statistics
+4. **Unified Interface**: Presents one object that matches the trait contract
+
+=== Alternative Approaches Considered
+
+==== Alternative 1: Refactor Low-Level Driver
+
+Make the low-level driver hold all controllers internally:
+
+[source,rust]
+----
+pub struct Ast1060I2c<'a> {
+    controllers: [&'a I2cController<'a>; 14],  // All controllers
+    current: Option<Controller>,                // Which one is active?
+    // State becomes complicated...
+}
+----
+
+**Why Not:**
+- ❌ Breaks clean per-controller design
+- ❌ Mixes hardware driver concerns with framework concerns
+- ❌ Complicates state management (which controller's state are we using?)
+- ❌ Makes standalone usage awkward
+- ❌ Requires major refactor of working code
+
+==== Alternative 2: Change Server Architecture
+
+Make the server manage 14 separate driver instances:
+
+[source,rust]
+----
+// In server main.rs
+let mut drivers: [Ast1060I2c; 14] = [
+    Ast1060I2c::new(&ctrl0, config)?,
+    Ast1060I2c::new(&ctrl1, config)?,
+    // ... 14 times
+];
+
+// Route in server based on controller
+fn handle_operation(controller: Controller, ...) {
+    match controller {
+        Controller::I2C0 => drivers[0].write_read(...),
+        Controller::I2C1 => drivers[1].write_read(...),
+        // ... 14 cases
+    }
+}
+----
+
+**Why Not:**
+- ❌ Every hardware platform needs custom server code
+- ❌ No uniform trait abstraction
+- ❌ Duplicates routing logic in server
+- ❌ Server becomes platform-specific (defeats the purpose)
+- ❌ Can't swap hardware implementations easily
+
+==== Alternative 3: Adapter Pattern (Selected)
+
+Add a thin adapter layer between driver and trait:
+
+[source,rust]
+----
+Low-level driver (Ast1060I2c)
+    ↓
+Adapter (Ast1060I2cAdapter)  ← 200 lines of code
+    ↓
+Trait (I2cHardware)
+    ↓
+Server (openprot-i2c-server)
+----
+
+**Why This Works:**
+- ✅ Low-level driver stays clean and focused
+- ✅ Server stays generic and hardware-agnostic
+- ✅ Clear separation of concerns
+- ✅ Only ~200 lines of adapter code
+- ✅ Easy to test each layer independently
+- ✅ Both layers remain reusable
+
+=== Analogy: Network Programming
+
+Think of it like event-driven network programming:
+
+```
+Low-level:  Each socket handles ONE connection
+           Socket(fd=3), Socket(fd=4), Socket(fd=5)
+           socket.read(), socket.write()
+
+High-level: epoll wants ONE object managing ALL sockets
+           epoll.wait() → returns which socket has activity
+           Needs to route events to specific sockets
+
+Adapter:   SocketManager holds array of sockets
+           manager.handle_event(fd=4) → routes to Socket(fd=4)
+```
+
+The adapter is the **"manager"** that:
+- Holds all socket/controller instances
+- Routes operations to the right instance
+- Maintains per-instance state
+
+=== What the Adapter Does NOT Do
+
+To keep it lightweight, the adapter does **not**:
+
+- ❌ Reimplement hardware operations (just delegates)
+- ❌ Change hardware behavior (thin wrapper)
+- ❌ Add complex business logic (that's in the application)
+- ❌ Buffer master mode operations (uses caller's buffers)
+
+It **only**:
+- ✅ Routes controller selection
+- ✅ Adds software buffering for slave mode (required, no hardware FIFO)
+- ✅ Tracks per-controller slave state
+- ✅ Implements the trait interface
+
+=== Cost-Benefit Analysis
+
+**Cost:**
+- ~200 lines of adapter code
+- Slight indirection overhead (~2 pointer dereferences)
+- One extra struct to understand
+
+**Benefit:**
+- Clean separation of concerns
+- Hardware driver remains reusable standalone
+- Server remains hardware-agnostic
+- Both components testable independently
+- Industry-standard adapter pattern
+
+**Verdict:** The benefits far outweigh the minimal cost. The adapter is a standard architectural pattern for exactly this situation: bridging incompatible but correct interfaces.
+
+== Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│  Application Task                           │
+│  - Uses drv-i2c-api                        │
+│  - Calls write(), read(), get_slave_message()│
+└──────────────────┬──────────────────────────┘
+                   │ IPC (sys_send/sys_recv)
+                   ▼
+┌─────────────────────────────────────────────┐
+│  openprot-i2c-server                        │  ◄── Already implemented
+│  - IPC handler                              │
+│  - Operation dispatch                       │
+│  - Notification management                  │
+│  - Uses I2cHardware trait                   │
+└──────────────────┬──────────────────────────┘
+                   │ Trait method calls
+                   ▼
+┌─────────────────────────────────────────────┐
+│  AST1060 I2C Hardware Adapter               │  ◄── NEED TO IMPLEMENT
+│  - Implements I2cHardware trait             │
+│  - Software message buffering               │
+│  - State management per controller          │
+└──────────────────┬──────────────────────────┘
+                   │ Direct hardware access
+                   ▼
+┌─────────────────────────────────────────────┐
+│  Ast1060I2c (Low-level driver)              │  ◄── Already implemented
+│  - Register manipulation                    │
+│  - Transfer modes (byte/buffer)             │
+│  - Timing configuration                     │
+│  - Interrupt handling                       │
+└─────────────────────────────────────────────┘
+```
+
+== Implementation Roadmap
+
+=== Phase 1: Trait Implementation Structure
+
+Create a new module: `drv/ast1060-i2c/src/hardware_adapter.rs`
+
+[source,rust]
+----
+//! I2cHardware trait implementation for AST1060
+
+use crate::*;
+use drv_i2c_types::{
+    traits::{I2cHardware, I2cSpeed, SlaveStatus},
+    Controller, ResponseCode, SlaveConfig, SlaveMessage,
+};
+use heapless::Deque;
+
+/// Per-controller state for slave mode
+struct SlaveState {
+    /// Configuration (address, port)
+    config: Option<SlaveConfig>,
+    /// Whether slave receive is enabled
+    receive_enabled: bool,
+    /// Message ring buffer (8 messages)
+    message_queue: Deque<SlaveMessage, 8>,
+    /// Statistics
+    messages_received: u32,
+    messages_dropped: u32,
+}
+
+impl SlaveState {
+    const fn new() -> Self {
+        Self {
+            config: None,
+            receive_enabled: false,
+            message_queue: Deque::new(),
+            messages_received: 0,
+            messages_dropped: 0,
+        }
+    }
+}
+
+/// AST1060 I2C hardware adapter implementing I2cHardware trait
+pub struct Ast1060I2cAdapter<'a> {
+    /// Array of per-controller I2C drivers (14 controllers)
+    controllers: [Option<Ast1060I2c<'a>>; 14],
+    /// Per-controller slave state
+    slave_states: [SlaveState; 14],
+}
+
+impl<'a> Ast1060I2cAdapter<'a> {
+    pub fn new() -> Self {
+        Self {
+            controllers: [
+                None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None,
+            ],
+            slave_states: [
+                SlaveState::new(), SlaveState::new(), SlaveState::new(),
+                SlaveState::new(), SlaveState::new(), SlaveState::new(),
+                SlaveState::new(), SlaveState::new(), SlaveState::new(),
+                SlaveState::new(), SlaveState::new(), SlaveState::new(),
+                SlaveState::new(), SlaveState::new(),
+            ],
+        }
+    }
+    
+    /// Initialize a controller
+    pub fn init_controller(
+        &mut self,
+        controller: Controller,
+        i2c_controller: &'a I2cController<'a>,
+        config: I2cConfig,
+    ) -> Result<(), I2cError> {
+        let idx = controller as usize;
+        if idx >= 14 {
+            return Err(I2cError::InvalidController);
+        }
+        
+        let i2c = Ast1060I2c::new(i2c_controller, config)?;
+        self.controllers[idx] = Some(i2c);
+        Ok(())
+    }
+    
+    /// Get mutable reference to controller driver
+    fn get_controller_mut(
+        &mut self,
+        controller: Controller,
+    ) -> Result<&mut Ast1060I2c<'a>, ResponseCode> {
+        let idx = controller as usize;
+        self.controllers
+            .get_mut(idx)
+            .and_then(|opt| opt.as_mut())
+            .ok_or(ResponseCode::BadController)
+    }
+    
+    /// Get mutable reference to slave state
+    fn get_slave_state_mut(
+        &mut self,
+        controller: Controller,
+    ) -> Result<&mut SlaveState, ResponseCode> {
+        let idx = controller as usize;
+        self.slave_states
+            .get_mut(idx)
+            .ok_or(ResponseCode::BadController)
+    }
+}
+
+impl<'a> I2cHardware for Ast1060I2cAdapter<'a> {
+    type Error = ResponseCode;
+    
+    // ... implement trait methods (see Phase 2)
+}
+----
+
+=== Phase 2: Master Mode Operations
+
+Implement the core I2C master operations:
+
+[source,rust]
+----
+impl<'a> I2cHardware for Ast1060I2cAdapter<'a> {
+    type Error = ResponseCode;
+    
+    fn write_read(
+        &mut self,
+        controller: Controller,
+        addr: u8,
+        write_data: &[u8],
+        read_buffer: &mut [u8],
+    ) -> Result<usize, Self::Error> {
+        let i2c = self.get_controller_mut(controller)?;
+        
+        // Handle different scenarios
+        if write_data.is_empty() && read_buffer.is_empty() {
+            return Ok(0);
+        }
+        
+        if !write_data.is_empty() {
+            i2c.write(addr, write_data)
+                .map_err(Self::convert_error)?;
+        }
+        
+        if !read_buffer.is_empty() {
+            i2c.read(addr, read_buffer)
+                .map_err(Self::convert_error)?;
+            Ok(read_buffer.len())
+        } else {
+            Ok(0)
+        }
+    }
+    
+    fn write_read_block(
+        &mut self,
+        controller: Controller,
+        addr: u8,
+        write_data: &[u8],
+        read_buffer: &mut [u8],
+    ) -> Result<usize, Self::Error> {
+        // SMBus block read: first byte is length
+        let i2c = self.get_controller_mut(controller)?;
+        
+        // Write command
+        if !write_data.is_empty() {
+            i2c.write(addr, write_data)
+                .map_err(Self::convert_error)?;
+        }
+        
+        // Read length byte
+        let mut len_byte = [0u8; 1];
+        i2c.read(addr, &mut len_byte)
+            .map_err(Self::convert_error)?;
+        
+        let data_len = len_byte[0] as usize;
+        if data_len == 0 {
+            return Ok(0);
+        }
+        
+        // Read actual data
+        let to_read = data_len.min(read_buffer.len());
+        i2c.read(addr, &mut read_buffer[..to_read])
+            .map_err(Self::convert_error)?;
+        
+        Ok(to_read)
+    }
+    
+    fn configure_timing(
+        &mut self,
+        controller: Controller,
+        speed: I2cSpeed,
+    ) -> Result<(), Self::Error> {
+        let i2c = self.get_controller_mut(controller)?;
+        
+        let ast_speed = match speed {
+            I2cSpeed::Standard => crate::I2cSpeed::Standard,
+            I2cSpeed::Fast => crate::I2cSpeed::Fast,
+            I2cSpeed::FastPlus => crate::I2cSpeed::FastPlus,
+            I2cSpeed::HighSpeed => {
+                // AST1060 doesn't support high-speed mode
+                return Err(ResponseCode::OperationNotSupported);
+            }
+        };
+        
+        // Reconfigure timing
+        let config = I2cConfig {
+            speed: ast_speed,
+            ..Default::default()
+        };
+        
+        crate::configure_timing(i2c.regs(), &config)
+            .map_err(Self::convert_error)?;
+        
+        Ok(())
+    }
+    
+    fn reset_bus(
+        &mut self,
+        controller: Controller,
+    ) -> Result<(), Self::Error> {
+        let i2c = self.get_controller_mut(controller)?;
+        
+        crate::bus_recovery::recover_bus(i2c)
+            .map_err(Self::convert_error)?;
+        
+        Ok(())
+    }
+    
+    fn enable_controller(
+        &mut self,
+        controller: Controller,
+    ) -> Result<(), Self::Error> {
+        // Controller is initialized during init_controller()
+        // This could enable clocks, configure pins, etc.
+        let _i2c = self.get_controller_mut(controller)?;
+        
+        // For AST1060, controllers are always enabled once initialized
+        Ok(())
+    }
+    
+    fn disable_controller(
+        &mut self,
+        controller: Controller,
+    ) -> Result<(), Self::Error> {
+        let i2c = self.get_controller_mut(controller)?;
+        
+        // Disable interrupts and slave mode
+        unsafe {
+            i2c.regs().i2cm10().write(|w| w.bits(0)); // Master interrupts
+            i2c.regs().i2cs20().write(|w| w.bits(0)); // Slave interrupts
+        }
+        
+        // Disable controller
+        i2c.regs().i2cc00().modify(|_, w| {
+            w.enbl_master_fn()
+                .clear_bit()
+                .enbl_slave_fn()
+                .clear_bit()
+        });
+        
+        Ok(())
+    }
+    
+    /// Helper to convert AST1060 errors to ResponseCode
+    fn convert_error(err: I2cError) -> ResponseCode {
+        match err {
+            I2cError::NoAcknowledge => ResponseCode::NoDevice,
+            I2cError::Timeout => ResponseCode::ControllerBusy,
+            I2cError::Invalid => ResponseCode::BadArg,
+            I2cError::InvalidAddress => ResponseCode::BadSlaveAddress,
+            I2cError::BusError => ResponseCode::BusError,
+            I2cError::SlaveError => ResponseCode::SlaveConfigurationFailed,
+            I2cError::InvalidController => ResponseCode::BadController,
+            // Add more mappings as needed
+            _ => ResponseCode::BusError,
+        }
+    }
+}
+----
+
+=== Phase 3: Slave Mode Implementation
+
+**Critical: Software Message Buffering**
+
+[source,rust]
+----
+impl<'a> I2cHardware for Ast1060I2cAdapter<'a> {
+    fn configure_slave_mode(
+        &mut self,
+        controller: Controller,
+        config: &SlaveConfig,
+    ) -> Result<(), Self::Error> {
+        let i2c = self.get_controller_mut(controller)?;
+        let state = self.get_slave_state_mut(controller)?;
+        
+        // Validate address
+        if config.address > 0x7F || config.address < 0x08 {
+            return Err(ResponseCode::BadSlaveAddress);
+        }
+        
+        // Check for reserved addresses
+        if is_reserved_address(config.address) {
+            return Err(ResponseCode::ReservedAddress);
+        }
+        
+        // Configure hardware
+        let ast_config = crate::SlaveConfig::new(config.address)
+            .map_err(Self::convert_error)?;
+        
+        i2c.configure_slave(&ast_config)
+            .map_err(Self::convert_error)?;
+        
+        // Store configuration
+        state.config = Some(*config);
+        
+        Ok(())
+    }
+    
+    fn enable_slave_receive(
+        &mut self,
+        controller: Controller,
+    ) -> Result<(), Self::Error> {
+        let state = self.get_slave_state_mut(controller)?;
+        
+        // Check that slave is configured
+        if state.config.is_none() {
+            return Err(ResponseCode::SlaveNotEnabled);
+        }
+        
+        // Enable receive
+        state.receive_enabled = true;
+        
+        // Hardware is already configured and listening from configure_slave()
+        // The AST1060 slave mode is automatically active once configured
+        
+        Ok(())
+    }
+    
+    fn disable_slave_receive(
+        &mut self,
+        controller: Controller,
+    ) -> Result<(), Self::Error> {
+        let i2c = self.get_controller_mut(controller)?;
+        let state = self.get_slave_state_mut(controller)?;
+        
+        // Disable hardware slave mode
+        i2c.disable_slave();
+        
+        // Clear state
+        state.receive_enabled = false;
+        state.message_queue.clear();
+        
+        Ok(())
+    }
+    
+    fn poll_slave_messages(
+        &mut self,
+        controller: Controller,
+        messages: &mut [SlaveMessage],
+    ) -> Result<usize, Self::Error> {
+        let state = self.get_slave_state_mut(controller)?;
+        
+        if !state.receive_enabled {
+            return Err(ResponseCode::SlaveNotEnabled);
+        }
+        
+        // Pop messages from software queue
+        let count = messages.len().min(state.message_queue.len());
+        for i in 0..count {
+            if let Some(msg) = state.message_queue.pop_front() {
+                messages[i] = msg;
+            }
+        }
+        
+        Ok(count)
+    }
+    
+    fn get_slave_status(
+        &self,
+        controller: Controller,
+    ) -> Result<SlaveStatus, Self::Error> {
+        let idx = controller as usize;
+        let state = self.slave_states
+            .get(idx)
+            .ok_or(ResponseCode::BadController)?;
+        
+        Ok(SlaveStatus {
+            enabled: state.receive_enabled,
+            messages_received: state.messages_received,
+            messages_dropped: state.messages_dropped,
+            address_matches: 0, // Could track if needed
+            bus_errors: 0,      // Could track if needed
+            buffer_full: state.message_queue.is_full(),
+        })
+    }
+}
+
+fn is_reserved_address(addr: u8) -> bool {
+    matches!(addr, 0x00..=0x07 | 0x78..=0x7F)
+}
+----
+
+=== Phase 4: Interrupt Handler Integration
+
+**Critical: Buffer messages from hardware to software queue**
+
+[source,rust]
+----
+impl<'a> Ast1060I2cAdapter<'a> {
+    /// Called from interrupt handler when slave data received
+    ///
+    /// This is the CRITICAL path - must execute quickly!
+    pub fn handle_slave_interrupt(
+        &mut self,
+        controller: Controller,
+    ) -> Option<()> {
+        let idx = controller as usize;
+        
+        // Get driver and state
+        let i2c = self.controllers.get_mut(idx)?.as_mut()?;
+        let state = self.slave_states.get_mut(idx)?;
+        
+        if !state.receive_enabled {
+            return None;
+        }
+        
+        // Read from hardware (32-byte buffer)
+        let mut hw_buffer = [0u8; 256];
+        let len = match i2c.slave_read(&mut hw_buffer) {
+            Ok(n) => n,
+            Err(_) => return None,
+        };
+        
+        if len == 0 {
+            return None;
+        }
+        
+        // Get source address (if available from hardware)
+        // AST1060 matched_address register contains the address that was matched
+        let source_addr = i2c.regs().i2cs40().read().bits() as u8;
+        
+        // Create message
+        let message = match SlaveMessage::new(source_addr, &hw_buffer[..len]) {
+            Ok(m) => m,
+            Err(_) => return None,
+        };
+        
+        // Buffer in software queue
+        if state.message_queue.is_full() {
+            // Queue full - drop message and track
+            state.messages_dropped += 1;
+            return None;
+        }
+        
+        state.message_queue.push_back(message).ok()?;
+        state.messages_received += 1;
+        
+        Some(())
+    }
+}
+----
+
+=== Phase 5: Server Integration
+
+Update `drv/openprot-i2c-server/src/main.rs` to use real hardware:
+
+[source,rust]
+----
+#![no_std]
+#![no_main]
+
+use drv_i2c_api::*;
+use drv_i2c_types::{traits::I2cHardware, Op, ResponseCode};
+
+#[cfg(feature = "mock")]
+mod mock_driver;
+#[cfg(feature = "mock")]
+use mock_driver::MockI2cDriver;
+
+#[cfg(not(feature = "mock"))]
+use drv_ast1060_i2c::Ast1060I2cAdapter;
+
+#[export_name = "main"]
+fn main() -> ! {
+    // Initialize hardware adapter
+    #[cfg(feature = "mock")]
+    let mut driver = MockI2cDriver::new();
+    
+    #[cfg(not(feature = "mock"))]
+    let mut driver = {
+        let mut adapter = Ast1060I2cAdapter::new();
+        
+        // Initialize controllers (example for I2C0)
+        let i2c0_controller = I2cController {
+            controller: Controller::I2C0,
+            registers: unsafe { &*ast1060_pac::I2c0::ptr() },
+            buff_registers: unsafe { &*ast1060_pac::I2cbuff0::ptr() },
+            notification: None,
+        };
+        
+        let config = I2cConfig {
+            xfer_mode: I2cXferMode::BufferMode,
+            speed: I2cSpeed::Fast,
+            multi_master: false,
+            smbus_timeout: false,
+            smbus_alert: false,
+            timing_config: None,
+        };
+        
+        adapter.init_controller(Controller::I2C0, &i2c0_controller, config)
+            .expect("Failed to init I2C0");
+        
+        // Initialize other controllers as needed...
+        
+        adapter
+    };
+    
+    // Rest of server implementation unchanged...
+    let mut buffer = [0u8; 4];
+    loop {
+        let msginfo = sys_recv_open(&mut buffer, TIMER_NOTIF);
+        // ... handle operations ...
+    }
+}
+----
+
+== Buffer Management Strategy
+
+=== Recommended Configuration
+
+[source,rust]
+----
+/// Ring buffer size per controller
+/// 
+/// Rationale:
+/// - 8 messages provides good burst tolerance
+/// - At 257 bytes per message = 2056 bytes per controller
+/// - For 2 active slave controllers = ~4KB total
+const MESSAGE_BUFFER_SIZE: usize = 8;
+
+/// Maximum message size (I2C spec + protocol overhead)
+const MAX_MESSAGE_SIZE: usize = 257; // 1 addr + 1 len + 255 data
+----
+
+=== Critical Timing Requirements
+
+**AST1060 Constraint:**
+```
+Time between interrupts must be > interrupt handler latency
+```
+
+**Interrupt Handler Budget:**
+- Read 32 bytes from hardware: ~1-2 µs
+- Create SlaveMessage: ~500 ns
+- Push to ring buffer: ~200 ns
+- **Total: ~3 µs maximum**
+
+**What if back-to-back messages arrive?**
+- Message interval: ~250 µs at 400 kHz (32 bytes)
+- Handler latency: ~3 µs
+- **Margin: 247 µs - SAFE**
+
+=== Buffer Overflow Handling
+
+[source,rust]
+----
+// In interrupt handler
+if state.message_queue.is_full() {
+    state.messages_dropped += 1;
+    
+    // Log warning if drops exceed threshold
+    if state.messages_dropped % 100 == 0 {
+        ringbuf_entry!(Trace::BufferOverflow {
+            controller: controller as u8,
+            total_drops: state.messages_dropped,
+        });
+    }
+    
+    return None; // Drop message
+}
+----
+
+**Recovery Strategy:**
+- Protocol layer (MCTP, SMBus) will retry
+- Client can check statistics via `get_slave_status()`
+- Increase buffer size if drops are frequent
+
+== Testing Strategy
+
+=== Unit Tests
+
+[source,rust]
+----
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_master_write_read() {
+        let mut adapter = Ast1060I2cAdapter::new();
+        // Initialize controller...
+        
+        let write_data = [0x42];
+        let mut read_data = [0u8; 16];
+        
+        let result = adapter.write_read(
+            Controller::I2C0,
+            0x50,
+            &write_data,
+            &mut read_data,
+        );
+        
+        assert!(result.is_ok());
+    }
+    
+    #[test]
+    fn test_slave_buffer_overflow() {
+        let mut adapter = Ast1060I2cAdapter::new();
+        // Initialize and configure slave...
+        
+        // Fill buffer
+        for i in 0..8 {
+            adapter.handle_slave_interrupt(Controller::I2C0);
+        }
+        
+        // Overflow
+        adapter.handle_slave_interrupt(Controller::I2C0);
+        
+        let status = adapter.get_slave_status(Controller::I2C0).unwrap();
+        assert_eq!(status.messages_dropped, 1);
+    }
+}
+----
+
+=== Integration Tests
+
+Create test application that exercises the full stack:
+
+[source,rust]
+----
+// In app/ast1060-i2c-test/src/main.rs
+
+#[export_name = "main"]
+fn main() -> ! {
+    let device = I2cDevice::new(
+        i2c_task,
+        Controller::I2C0,
+        PortIndex(0),
+        None,
+        0x50,
+    );
+    
+    // Test master mode
+    let mut buffer = [0u8; 16];
+    device.read_reg(0x00u8, &mut buffer).unwrap_lite();
+    
+    // Test slave mode
+    device.configure_slave_address(0x1D).unwrap_lite();
+    device.enable_slave_receive().unwrap_lite();
+    device.enable_slave_notification(0x0001).unwrap_lite();
+    
+    loop {
+        let msg = sys_recv_open(&mut buffer, 0x0001);
+        if msg.sender == TaskId::KERNEL {
+            if let Ok(slave_msg) = device.get_slave_message() {
+                // Process message
+            }
+        }
+    }
+}
+----
+
+== Error Conversion Table
+
+[source,rust]
+----
+fn convert_error(err: I2cError) -> ResponseCode {
+    match err {
+        I2cError::NoAcknowledge => ResponseCode::NoDevice,
+        I2cError::Timeout => ResponseCode::ControllerBusy,
+        I2cError::Invalid => ResponseCode::BadArg,
+        I2cError::InvalidAddress => ResponseCode::BadSlaveAddress,
+        I2cError::BusError => ResponseCode::BusError,
+        I2cError::ArbitrationLost => ResponseCode::BusError,
+        I2cError::SlaveError => ResponseCode::SlaveConfigurationFailed,
+        I2cError::InvalidController => ResponseCode::BadController,
+        I2cError::BufferFull => ResponseCode::SlaveBufferFull,
+    }
+}
+----
+
+== Build Configuration
+
+Update `Cargo.toml`:
+
+[source,toml]
+----
+[dependencies]
+drv-ast1060-i2c = { path = "../ast1060-i2c", optional = true }
+drv-mock-i2c-driver = { path = "../mock-i2c-driver", optional = true }
+
+[features]
+default = []
+mock = ["drv-mock-i2c-driver"]
+ast1060 = ["drv-ast1060-i2c"]
+----
+
+Build for different targets:
+```bash
+# Mock driver for testing
+cargo build --features mock
+
+# Real hardware
+cargo build --features ast1060
+```
+
+== Performance Considerations
+
+=== Memory Usage
+
+```
+Per Controller:
+- Ast1060I2c struct: ~64 bytes
+- SlaveState: ~2088 bytes (8 × 257 bytes + overhead)
+- Total per controller: ~2152 bytes
+
+System Total (2 active slave controllers):
+- ~4304 bytes (~1.7% of 256KB RAM)
+```
+
+=== Interrupt Latency
+
+**Target:** < 5 µs from interrupt to buffer copy complete
+
+**Measurement points:**
+- Entry to interrupt handler
+- Hardware register read complete
+- Ring buffer push complete
+- Exit interrupt handler
+
+Use SysTick or DWT cycle counter for measurement.
+
+=== Throughput
+
+**Master Mode:**
+- Buffer mode (32 bytes): 1 transaction
+- Large transfer (256 bytes): 8 × 32-byte chunks
+- Overhead: ~100 µs per chunk at 400 kHz
+
+**Slave Mode:**
+- Limited by interrupt handler latency
+- Theoretical max: 1 message per 250 µs = 4000 msg/sec
+- Practical: Consider burst behavior and client processing time
+
+== Common Pitfalls
+
+=== 1. Forgetting to Initialize Controllers
+
+```rust
+// BAD: Using controller without initialization
+let adapter = Ast1060I2cAdapter::new();
+adapter.write_read(...); // Will fail!
+
+// GOOD: Initialize first
+let mut adapter = Ast1060I2cAdapter::new();
+adapter.init_controller(Controller::I2C0, &controller, config)?;
+adapter.write_read(...); // Works!
+```
+
+=== 2. Interrupt Handler Too Slow
+
+```rust
+// BAD: Complex processing in interrupt
+fn handle_slave_interrupt(&mut self, controller: Controller) {
+    let data = self.read_hardware();
+    self.validate_message(data); // TOO SLOW
+    self.process_protocol(data);  // TOO SLOW
+    self.send_response();         // TOO SLOW
+}
+
+// GOOD: Minimal work, defer processing
+fn handle_slave_interrupt(&mut self, controller: Controller) {
+    let data = self.read_hardware();       // Fast
+    self.buffer_message(controller, data); // Fast
+    // Client task will process via get_slave_message()
+}
+```
+
+=== 3. Not Checking Buffer Capacity
+
+```rust
+// BAD: Blind push
+state.message_queue.push_back(message).unwrap(); // Panics if full!
+
+// GOOD: Check capacity
+if state.message_queue.is_full() {
+    state.messages_dropped += 1;
+    return None;
+}
+state.message_queue.push_back(message).ok();
+```
+
+=== 4. Ignoring Return Values
+
+```rust
+// BAD: Ignoring errors
+adapter.configure_slave_mode(controller, &config);
+
+// GOOD: Handle errors
+adapter.configure_slave_mode(controller, &config)
+    .map_err(|e| {
+        log_error!("Slave config failed: {:?}", e);
+        e
+    })?;
+```
+
+== Next Steps
+
+1. **Create hardware adapter module** (`drv/ast1060-i2c/src/hardware_adapter.rs`)
+2. **Implement I2cHardware trait** following Phase 1-3 structure
+3. **Add interrupt integration** following Phase 4
+4. **Update server** to use real hardware (Phase 5)
+5. **Write unit tests** for adapter layer
+6. **Create integration test app** to verify full stack
+7. **Measure performance** (latency, throughput)
+8. **Document any deviations** from this guide
+
+== Conclusion
+
+This implementation bridges the gap between the low-level AST1060 hardware driver and the high-level I2C API framework. The key challenges are:
+
+- **Software buffering**: Mandatory due to lack of hardware FIFO
+- **Fast interrupt handling**: Copy data quickly before next packet arrives
+- **Error conversion**: Map hardware errors to API error codes
+- **State management**: Track configuration and buffers per controller
+
+Following this guide ensures a robust, performant I2C driver implementation that integrates cleanly with the Hubris I2C API ecosystem.

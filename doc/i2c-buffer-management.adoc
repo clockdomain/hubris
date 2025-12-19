@@ -1,0 +1,739 @@
+= I2C Buffer Management in Hubris
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+== Overview
+
+Buffer management is critical for I2C operations in embedded systems, particularly when dealing with:
+
+- **Limited RAM**: Embedded systems have constrained memory
+- **Variable Message Lengths**: I2C transactions can be 1 to 255+ bytes
+- **Slave Mode Buffering**: Must buffer incoming messages without blocking
+- **Interrupt Context**: Some operations execute in interrupt handlers
+- **Zero-Copy Goals**: Minimize data copying for performance
+
+This document describes buffer management strategies for I2C drivers in Hubris, covering both master and slave modes.
+
+== Master Mode Buffer Management
+
+=== Transaction Buffers
+
+Master mode operations are **synchronous** and use caller-provided buffers.
+
+==== Write Operations
+
+[source,rust]
+----
+// Caller provides write buffer
+let data = [0x10, 0x20, 0x30];
+device.write(&data)?;
+
+// Buffer lifetime: 
+// - Caller owns buffer on stack
+// - Driver borrows during transaction
+// - No dynamic allocation needed
+----
+
+**Characteristics:**
+- Buffers provided by caller
+- Typically stack-allocated
+- Short-lived (duration of transaction)
+- No buffering in driver needed
+
+==== Read Operations
+
+[source,rust]
+----
+// Caller provides read buffer
+let mut buffer = [0u8; 32];
+device.read_reg(0x00u8, &mut buffer)?;
+
+// Buffer lifetime:
+// - Caller allocates on stack
+// - Driver writes directly to it
+// - Data available immediately after return
+----
+
+**Characteristics:**
+- Direct write to caller's buffer
+- Zero-copy operation
+- Stack-allocated by caller
+- No intermediate buffering
+
+==== Combined Write-Read
+
+[source,rust]
+----
+// Both buffers provided by caller
+let write_data = [0x42];  // Register address
+let mut read_data = [0u8; 16];
+device.write_read(0x50, &write_data, &mut read_data)?;
+
+// Driver manages transaction but uses provided buffers
+----
+
+**Driver Implementation:**
+[source,rust]
+----
+fn write_read(&mut self, addr: u8, write: &[u8], read: &mut [u8]) 
+    -> Result<usize, I2cError> 
+{
+    // No allocation needed - work directly with provided buffers
+    self.start_transfer(addr, write.len())?;
+    self.transmit_bytes(write)?;
+    self.restart_for_read(addr, read.len())?;
+    self.receive_bytes(read)?;
+    Ok(read.len())
+}
+----
+
+=== Hardware Buffer Mode
+
+Many I2C controllers have hardware FIFOs for buffering:
+
+**AST1060 Example:**
+- 32-byte hardware buffer per controller
+- Buffer mode vs. byte mode operation
+- DMA capable (future enhancement)
+
+[source,rust]
+----
+pub enum I2cXferMode {
+    /// Byte-by-byte mode (1 byte at a time)
+    ByteMode,
+    /// Buffer mode (up to 32 bytes via hardware buffer)
+    BufferMode,
+}
+
+impl Ast1060I2c {
+    fn write_buffer_mode(&mut self, addr: u8, bytes: &[u8]) 
+        -> Result<(), I2cError> 
+    {
+        // Copy to hardware buffer (32 bytes max per transaction)
+        for chunk in bytes.chunks(32) {
+            self.copy_to_hw_buffer(chunk)?;
+            self.start_hw_buffer_transfer(addr, chunk.len())?;
+            self.wait_completion()?;
+        }
+        Ok(())
+    }
+    
+    fn copy_to_hw_buffer(&self, data: &[u8]) -> Result<(), I2cError> {
+        let buff_regs = self.buff_regs();
+        for (i, &byte) in data.iter().enumerate() {
+            // Write to memory-mapped buffer registers
+            unsafe {
+                buff_regs.buffer_data(i).write(|w| w.bits(byte as u32));
+            }
+        }
+        Ok(())
+    }
+}
+----
+
+**Buffer Strategy:**
+- Small transactions (≤32 bytes): Single hardware buffer operation
+- Large transactions (>32 bytes): Chunked into multiple buffer operations
+- No dynamic allocation: Direct copy from caller's buffer to hardware
+
+== Slave Mode Buffer Management
+
+Slave mode is **asynchronous** and requires careful buffer management since messages arrive at unpredictable times.
+
+=== Challenge
+
+[source]
+----
+Time →
+
+Master      Slave Driver          Client Task
+  |              |                      |
+  | Write[10B]   |                      |
+  |------------->| Buffer message       |
+  |              | sys_post(notify)     |
+  |              |--------------------->|
+  |              |                      | get_message() [IPC]
+  |              |<---------------------|
+  |              | Return message       |
+  |              |--------------------->|
+  |              |                      | Process
+  | Write[20B]   |                      |
+  |------------->| Buffer message       |
+  |              | (OVERRUN if buffer full!)
+----
+
+**Problems:**
+1. Messages arrive asynchronously (interrupt-driven)
+2. Client processes messages via IPC (takes time)
+3. Multiple messages may arrive before client retrieves them
+4. Buffer overflow = lost messages
+
+=== Single Message Buffer (Simple)
+
+**Strategy:** Buffer only one message at a time.
+
+[source,rust]
+----
+pub struct SlaveState {
+    // Single message buffer
+    current_message: Option<SlaveMessage>,
+    notification_client: Option<(TaskId, u32)>,
+}
+
+impl SlaveState {
+    fn on_receive_interrupt(&mut self, data: &[u8], source: u8) {
+        // If buffer occupied, drop the new message (or overwrite)
+        if self.current_message.is_some() {
+            // Message overflow - previous message not retrieved yet
+            return; // Drop new message
+        }
+        
+        // Buffer the message
+        self.current_message = Some(SlaveMessage::new(source, data));
+        
+        // Notify client
+        if let Some((task, mask)) = self.notification_client {
+            sys_post(task, mask);
+        }
+    }
+    
+    fn get_message(&mut self) -> Result<SlaveMessage, ResponseCode> {
+        self.current_message.take()
+            .ok_or(ResponseCode::NoSlaveMessage)
+    }
+}
+----
+
+**Characteristics:**
+- ✅ Simple implementation
+- ✅ Minimal memory (one message worth)
+- ✅ Clear ownership semantics
+- ❌ Messages can be dropped if client is slow
+- ❌ No buffering across notifications
+
+**When to Use:**
+- Low message rate
+- Client processes messages quickly
+- Message loss is acceptable (will be retried by protocol layer)
+
+=== Ring Buffer (Recommended)
+
+**Strategy:** Use a ring buffer to queue multiple messages.
+
+[source,rust]
+----
+use heapless::Deque;
+
+pub struct SlaveState {
+    // Ring buffer for multiple messages
+    message_queue: Deque<SlaveMessage, 8>,  // Up to 8 messages
+    notification_client: Option<(TaskId, u32)>,
+    messages_dropped: u32,  // Statistics
+}
+
+impl SlaveState {
+    fn on_receive_interrupt(&mut self, data: &[u8], source: u8) {
+        let message = SlaveMessage::new(source, data);
+        
+        if self.message_queue.is_full() {
+            // Buffer full - must drop message
+            self.messages_dropped += 1;
+            return;
+        }
+        
+        // Enqueue message
+        let was_empty = self.message_queue.is_empty();
+        self.message_queue.push_back(message).ok();
+        
+        // Only notify if queue was empty (first message)
+        // Subsequent messages will be retrieved via repeated get_message() calls
+        if was_empty {
+            if let Some((task, mask)) = self.notification_client {
+                sys_post(task, mask);
+            }
+        }
+    }
+    
+    fn get_message(&mut self) -> Result<SlaveMessage, ResponseCode> {
+        self.message_queue.pop_front()
+            .ok_or(ResponseCode::NoSlaveMessage)
+    }
+}
+----
+
+**Characteristics:**
+- ✅ Buffers multiple messages
+- ✅ Reduced message loss
+- ✅ Client can be temporarily slow
+- ✅ Better for burst traffic
+- ⚠️ Uses more memory (N × message size)
+- ⚠️ Still bounded - can overflow
+
+**When to Use:**
+- Moderate to high message rate
+- Bursty traffic patterns
+- Message loss should be minimized
+- RAM budget allows for buffer
+
+=== Per-Controller Buffer Organization
+
+Different I2C controllers need independent buffers:
+
+[source,rust]
+----
+pub struct I2cDriverState {
+    // One slave state per controller
+    slave_states: [Option<SlaveState>; MAX_I2C_CONTROLLERS],
+}
+
+impl I2cDriverState {
+    fn get_slave_state(&mut self, controller: Controller) 
+        -> Option<&mut SlaveState> 
+    {
+        let idx = controller as usize;
+        self.slave_states[idx].as_mut()
+    }
+    
+    fn handle_i2c0_interrupt(&mut self) {
+        if let Some(state) = self.get_slave_state(Controller::I2C0) {
+            // Read from I2C0 hardware
+            let (source, data) = self.read_i2c0_hardware();
+            state.on_receive_interrupt(data, source);
+        }
+    }
+}
+----
+
+**Organization:**
+- Each controller has independent buffer space
+- No contention between controllers
+- Controller N interrupt → Buffer N → Client N
+
+== Hardware Buffer/FIFO Interaction
+
+=== Reading from Hardware Buffers
+
+I2C controllers use different hardware buffering approaches:
+
+- **FIFO-based** (STM32, LPC55): Automatic queuing, depth tracking, FIFO full/empty flags
+- **Buffer-based** (AST1060): Fixed staging memory, single packet at a time, manual register access
+
+Both require prompt reading in interrupt handlers:
+
+[source,rust]
+----
+fn slave_interrupt_handler(&mut self, controller: Controller) {
+    let regs = self.get_registers(controller);
+    
+    // Check for receive data available
+    let status = regs.slave_status().read().bits();
+    if (status & RX_DONE) == 0 {
+        return; // No data
+    }
+    
+    // Get length from hardware
+    let len = regs.rx_length().read().bits() as usize;
+    
+    // Read from hardware buffer/FIFO into temporary buffer
+    // Note: Implementation varies by hardware:
+    // - FIFO-based: Read from FIFO data register (auto-advances)
+    // - Buffer-based: Read from specific buffer registers
+    let mut hw_buffer = [0u8; 256];
+    for i in 0..len {
+        hw_buffer[i] = regs.rx_data(i).read().bits() as u8;
+    }
+    
+    // Get source address (if available from hardware)
+    let source_addr = regs.matched_address().read().bits() as u8;
+    
+    // Now copy to our message buffer (software buffer)
+    let message = SlaveMessage::new(source_addr, &hw_buffer[..len])?;
+    self.buffer_message(controller, message);
+    
+    // Clear hardware status
+    regs.clear_rx_done();
+}
+----
+
+**Two-Level Buffering:**
+1. **Hardware Buffer/FIFO**: Temporary storage
+   - **FIFO-based** (STM32, LPC55): 16-32 bytes, automatic queuing, overflows if not drained
+   - **Buffer-based** (AST1060): 32 bytes staging memory, single packet, overwritten on next transaction
+   - Must be read quickly in interrupt
+   - Limited capacity
+
+2. **Software Buffer**: Our message queue
+   - Holds multiple complete messages
+   - Flexible capacity (ring buffer)
+   - Survives across interrupts
+   - Required for all architectures
+
+=== Flow Control Strategies
+
+**1. No Flow Control (Best Effort)**
+[source,rust]
+----
+// Drop messages if software buffer full
+if message_queue.is_full() {
+    // Drop incoming message
+    // Master will retry via protocol (MCTP, SMBus, etc.)
+}
+----
+
+**2. Clock Stretching (Hardware Support Required)**
+[source,rust]
+----
+// Stretch clock if buffer full
+if message_queue.is_full() {
+    regs.enable_clock_stretch();
+    // Wait for space to become available
+    // Hardware holds SCL low, blocking master
+}
+----
+
+**3. NACK Response (Selective)**
+[source,rust]
+----
+// NACK future transactions if buffer full
+if message_queue.is_full() {
+    regs.disable_address_ack();
+    // Stop accepting new transactions
+    // Re-enable when buffer has space
+}
+----
+
+== IPC Buffer Management
+
+=== GetSlaveMessage Operation
+
+Client calls `get_slave_message()` which uses IPC with a lease:
+
+[source,rust]
+----
+// Client side
+let mut buffer = [0u8; 257];  // max: 1 + 1 + 255
+match device.get_slave_message() {
+    Ok(msg) => {
+        // msg contains: source_address + data
+    }
+    Err(ResponseCode::NoSlaveMessage) => {
+        // No message available
+    }
+}
+
+// Server side (in driver)
+fn handle_get_slave_message(msginfo: &RecvMessage, driver: &mut Driver) {
+    let controller = extract_controller(msginfo);
+    
+    // Get message from software buffer
+    match driver.get_buffered_message(controller) {
+        Some(msg) => {
+            // Copy to client's lease
+            let mut response = [0u8; 257];
+            response[0] = msg.source_address;
+            response[1] = msg.data_length;
+            response[2..2+msg.data_length].copy_from_slice(msg.data());
+            
+            // Write to lease (IPC)
+            write_to_lease(msginfo, &response);
+            sys_reply(msginfo.sender, 0, &[]);
+        }
+        None => {
+            sys_reply(msginfo.sender, ResponseCode::NoSlaveMessage as u32, &[]);
+        }
+    }
+}
+----
+
+**Buffer Copies:**
+1. Hardware FIFO → Driver interrupt handler stack
+2. Interrupt stack → Driver message queue (heap/static)
+3. Driver message queue → IPC response buffer
+4. IPC response buffer → Client's buffer (via lease)
+
+**Optimization Opportunity:**
+Consider zero-copy via shared memory for high-throughput scenarios (future work).
+
+== Memory Budget Analysis
+
+=== Per-Controller Budget
+
+[source]
+----
+Master Mode (synchronous - no buffering):
+- 0 bytes (uses caller buffers)
+
+Slave Mode (1 message buffer):
+- SlaveMessage: 257 bytes (1 addr + 1 len + 255 data)
+- State overhead: ~16 bytes
+- Total: ~273 bytes per controller
+
+Slave Mode (8 message ring buffer):
+- SlaveMessage × 8: 2056 bytes
+- Deque overhead: ~16 bytes
+- State overhead: ~16 bytes
+- Total: ~2088 bytes per controller
+----
+
+=== System Budget Example
+
+[source]
+----
+System: AST1060 with 14 I2C controllers
+RAM: 256KB total
+
+Scenario: 2 controllers with slave mode, 8-message buffers
+- Controller 0: 2088 bytes
+- Controller 1: 2088 bytes
+- Total I2C buffers: 4176 bytes (~1.6% of RAM)
+
+Scenario: All 14 controllers with slave mode, 4-message buffers
+- 14 × 1044 bytes = 14.6 KB (~5.7% of RAM)
+----
+
+== Best Practices
+
+=== 1. Size Buffers Based on Traffic
+
+[source,rust]
+----
+// Low-rate management interface (MCTP)
+const MGMT_BUFFER_SIZE: usize = 4;  // 4 messages
+
+// High-rate sensor data
+const SENSOR_BUFFER_SIZE: usize = 16;  // 16 messages
+----
+
+=== 2. Monitor Buffer Health
+
+[source,rust]
+----
+pub struct SlaveStatus {
+    pub messages_received: u32,
+    pub messages_dropped: u32,
+    pub buffer_usage_peak: u8,  // Max depth reached
+}
+
+// Log if drops exceed threshold
+if status.messages_dropped > ACCEPTABLE_DROP_RATE {
+    log_warning!("I2C slave buffer overflow");
+}
+----
+
+=== 3. Validate Message Sizes
+
+[source,rust]
+----
+fn buffer_message(&mut self, data: &[u8]) -> Result<(), ResponseCode> {
+    // Reject oversized messages early
+    if data.len() > MAX_MESSAGE_SIZE {
+        return Err(ResponseCode::TooMuchData);
+    }
+    
+    // ... buffer the message ...
+}
+----
+
+=== 4. Prioritize Critical Messages
+
+[source,rust]
+----
+// If buffer full, make room by dropping lowest-priority message
+if message_queue.is_full() {
+    if new_message.is_high_priority() {
+        message_queue.pop_front();  // Drop oldest low-priority
+        message_queue.push_back(new_message);
+    }
+}
+----
+
+=== 5. Use Static Allocation
+
+[source,rust]
+----
+// Prefer compile-time sized buffers
+static mut SLAVE_BUFFERS: [SlaveState; 14] = 
+    [SlaveState::new(); 14];
+
+// Avoid heap allocation
+// - No fragmentation
+// - Predictable memory usage
+// - Faster allocation (compile time)
+----
+
+== Common Pitfalls
+
+=== 1. Undersized Buffers
+
+**Problem:** Buffer too small for traffic pattern
+
+[source,rust]
+----
+// BAD: Single message buffer with bursty traffic
+message_queue: Deque<SlaveMessage, 1>  // Will overflow
+----
+
+**Solution:** Size based on worst-case burst + processing latency
+
+=== 2. Blocking in Interrupt Handler
+
+**Problem:** Slow buffer copy in interrupt context
+
+[source,rust]
+----
+// BAD: Slow operation in interrupt
+fn interrupt_handler(&mut self) {
+    let data = self.read_hardware_slow();  // Takes too long
+    self.process_message(data);  // More work!
+    // Other interrupts blocked too long
+}
+----
+
+**Solution:** Minimal work in interrupt, defer processing
+
+[source,rust]
+----
+// GOOD: Fast interrupt handler
+fn interrupt_handler(&mut self) {
+    let data = self.read_hardware_fast();  // Just read hardware
+    self.queue_message(data);  // Quick enqueue
+    self.notify_client();  // Post notification
+    // Processing happens in client task context
+}
+----
+
+=== 3. Memory Leaks via IPC
+
+**Problem:** Forgetting to release buffers
+
+[source,rust]
+----
+// BAD: Allocate but never free
+let msg = allocate_message();
+if error {
+    return;  // Leaked!
+}
+----
+
+**Solution:** Use RAII and Option::take()
+
+[source,rust]
+----
+// GOOD: Automatic cleanup
+fn get_message(&mut self) -> Option<SlaveMessage> {
+    self.current_message.take()  // Takes ownership, clears buffer
+}
+----
+
+=== 4. Race Conditions
+
+**Problem:** Concurrent access to buffer
+
+[source,rust]
+----
+// Interrupt handler (writes)
+fn interrupt() {
+    BUFFER.push(message);
+}
+
+// IPC handler (reads)
+fn get_message() {
+    BUFFER.pop()  // RACE!
+}
+----
+
+**Solution:** Use atomic operations or disable interrupts
+
+[source,rust]
+----
+// GOOD: Atomic queue or critical section
+fn get_message() -> Option<SlaveMessage> {
+    cortex_m::interrupt::free(|_| {
+        BUFFER.pop()
+    })
+}
+----
+
+== Platform-Specific Considerations
+
+=== AST1060
+
+**Hardware:**
+- 14 I2C controllers
+- 32-byte hardware staging buffer per controller (NOT a FIFO)
+- Fixed memory-mapped registers (8 DWORDs: i2cbuff00-i2cbuff1c)
+- Packet mode for slave operations
+- Single packet at a time (no hardware queuing)
+
+**Buffer Architecture:**
+- Hardware buffer holds ONE transaction up to 32 bytes
+- No automatic FIFO advancement
+- Manual register read/write for data transfer
+- Next packet overwrites previous buffer contents
+
+**Implications:**
+- **Critical**: Must copy data from hardware buffer immediately in interrupt handler
+- Hardware provides NO queuing - all buffering must be in software
+- If second packet arrives before first is copied, first is LOST
+
+**Recommendations:**
+- 4-8 message software ring buffer REQUIRED per active slave controller
+- Use packet mode for bulk transfer efficiency
+- Minimize interrupt handler latency (copy to software buffer quickly)
+- Monitor buffer usage and drops via statistics
+
+=== STM32H7
+
+**Hardware:**
+- Up to 4 I2C controllers
+- 32-byte hardware FIFO (true FIFO with automatic advancement)
+- FIFO status flags (full, empty, threshold)
+- DMA capable
+
+**Buffer Architecture:**
+- Hardware FIFO automatically queues data
+- Read from single data register, FIFO advances automatically
+- FIFO depth tracking in hardware
+
+**Recommendations:**
+- 4 message software buffer sufficient for most cases
+- Hardware FIFO provides some natural buffering
+- Consider DMA for high-throughput scenarios
+- Use FIFO full interrupt for flow control
+
+=== LPC55
+
+**Hardware:**
+- Multiple I2C controllers
+- Small hardware FIFO (16 bytes)
+- True FIFO with automatic advancement
+- Limited RAM (compared to STM32H7)
+
+**Buffer Architecture:**
+- Hardware FIFO provides minimal queuing
+- Shallower than STM32, overflows more easily
+
+**Recommendations:**
+- 2-4 message software buffer (conserve RAM)
+- Aggressive flow control due to small hardware FIFO
+- Process messages quickly to avoid overflow
+
+== Conclusion
+
+Effective buffer management in I2C drivers requires balancing:
+
+- **Memory constraints** vs. **buffering capacity**
+- **Interrupt latency** vs. **processing complexity**
+- **Message loss** vs. **flow control complexity**
+
+Key takeaways:
+
+1. **Master mode**: Use caller-provided buffers (zero-copy)
+2. **Slave mode**: Ring buffer with 4-8 messages typical
+3. **Hardware FIFOs**: Drain quickly in interrupt handler
+4. **IPC**: Accept some copying for simplicity and safety
+5. **Monitor**: Track drops and buffer usage
+
+By following these guidelines, I2C drivers can handle typical traffic patterns while maintaining predictable memory usage and low latency.

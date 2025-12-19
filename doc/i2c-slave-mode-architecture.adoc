@@ -1,0 +1,779 @@
+= I2C Slave Mode Support Architecture
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+== Executive Summary
+
+I2C slave mode enables embedded systems to act as responders on an I2C bus, accepting commands from external masters. This is essential for:
+
+- **Management Communication**: BMC/host communication via MCTP-over-I2C
+- **Configuration Access**: Remote configuration and monitoring
+- **Peer-to-Peer**: Device-to-device communication in multi-board systems
+- **Standards Compliance**: PMBus, SMBus, IPMI protocols
+
+This document describes the architecture for slave mode support in Hubris, independent of specific hardware implementation.
+
+== Architecture Overview
+
+=== Three-Layer Design
+
+```
+┌─────────────────────────────────────────────────────┐
+│  APPLICATION LAYER                                  │
+│  - Protocol implementation (MCTP, PMBus, etc.)      │
+│  - Business logic                                   │
+│  - Uses high-level API                              │
+└──────────────────┬──────────────────────────────────┘
+                   │ drv-i2c-api
+                   │ - configure_slave_address()
+                   │ - enable_slave_receive()
+                   │ - enable_slave_notification()
+                   │ - get_slave_message()
+                   ▼
+┌─────────────────────────────────────────────────────┐
+│  FRAMEWORK LAYER                                    │
+│  - IPC handling (openprot-i2c-server)               │
+│  - Notification delivery via sys_post()             │
+│  - Operation dispatch                               │
+│  - Hardware abstraction (I2cHardware trait)         │
+└──────────────────┬──────────────────────────────────┘
+                   │ Hardware trait calls
+                   │ - configure_slave_mode()
+                   │ - enable_slave_receive()
+                   │ - poll_slave_messages()
+                   ▼
+┌─────────────────────────────────────────────────────┐
+│  HARDWARE LAYER                                     │
+│  - Platform-specific driver (AST1060, STM32, etc.)  │
+│  - Register manipulation                            │
+│  - Interrupt handling                               │
+│  - Software buffering (if no hardware FIFO)         │
+└─────────────────────────────────────────────────────┘
+```
+
+=== Key Design Principles
+
+1. **Hardware Agnostic**: Application code works across different I2C controllers
+2. **Interrupt Driven**: Low latency, power efficient notification model
+3. **Safe Buffering**: Messages buffered in driver, not lost during processing
+4. **Single Subscriber**: One task per controller for simple ownership model
+5. **Protocol Neutral**: Framework doesn't interpret message contents
+
+== Components
+
+=== Application Layer
+
+**Responsibilities:**
+- Implement protocol logic (MCTP, PMBus, etc.)
+- Configure slave address
+- React to notifications
+- Retrieve and process messages
+- Send responses (via master mode)
+
+**Example Flow:**
+```
+1. Configure slave address (e.g., 0x1D for MCTP endpoint)
+2. Enable slave receive mode
+3. Register for notifications
+4. Wait for notification (sys_recv_open)
+5. Retrieve message (get_slave_message)
+6. Process message (parse MCTP, etc.)
+7. Send response if needed (write/read operations)
+8. Repeat from step 4
+```
+
+**Isolation:**
+- Each application task is isolated
+- No direct hardware access
+- Uses IPC to communicate with driver
+
+=== Framework Layer
+
+**Responsibilities:**
+- Accept IPC requests from applications
+- Validate parameters
+- Dispatch to hardware abstraction layer
+- Manage notification subscriptions
+- Deliver notifications via kernel sys_post()
+- Buffer messages between hardware and application
+
+**Key State:**
+- Per-controller notification subscriber: `Option<(TaskId, u32)>`
+- Per-controller message buffer: `Deque<SlaveMessage, N>`
+- Statistics: messages received, dropped, etc.
+
+**Notification Flow:**
+```
+Hardware IRQ → Driver Task → sys_post(client_task, mask) → Client Task
+```
+
+**Why Indirect?**
+- Kernel doesn't deliver hardware interrupts directly to applications
+- Driver task acts as trusted intermediary
+- Maintains memory isolation between tasks
+- Allows buffering and error handling
+
+=== Hardware Layer
+
+**Responsibilities:**
+- Configure I2C controller registers
+- Handle hardware interrupts
+- Read from hardware buffers/FIFOs
+- Copy to software buffers
+- Provide uniform interface via I2cHardware trait
+
+**Hardware Diversity:**
+Different I2C controllers have different capabilities:
+
+|===
+| Feature | STM32H7 | LPC55 | AST1060
+
+| Hardware FIFO
+| ✓ (32 bytes)
+| ✓ (16 bytes)
+| ✗ (32-byte buffer only)
+
+| Automatic queuing
+| ✓
+| ✓
+| ✗
+
+| Software buffering required
+| Optional
+| Optional
+| **Required**
+
+| Max message size
+| 255 bytes
+| 255 bytes
+| 255 bytes
+
+| Number of controllers
+| 4
+| ~4
+| 14
+|===
+
+**Abstraction Goal:** Hide these differences from upper layers
+
+== Message Flow
+
+=== Interrupt-Driven Receive Flow
+
+```
+┌─────────────┐
+│ I2C Master  │
+│ (External)  │
+└──────┬──────┘
+       │ I2C Write Transaction
+       │ Address: 0x1D, Data: [0x0F, 0x01, ...]
+       ▼
+┌──────────────────────────────────────────┐
+│ I2C Hardware                             │
+│ - Address matches configured 0x1D        │
+│ - Receives data into hardware buffer    │
+│ - Generates interrupt                    │
+└──────┬───────────────────────────────────┘
+       │ Hardware Interrupt
+       ▼
+┌──────────────────────────────────────────┐
+│ Kernel                                   │
+│ - Dispatches interrupt to driver task   │
+└──────┬───────────────────────────────────┘
+       │ Task Notification
+       ▼
+┌──────────────────────────────────────────┐
+│ I2C Driver Task (Interrupt Handler)     │
+│                                          │
+│ 1. Read hardware status                 │
+│ 2. Copy data from hardware buffer       │
+│ 3. Create SlaveMessage struct           │
+│ 4. Push to software ring buffer         │
+│ 5. sys_post(client_task_id, notif_mask) │
+│                                          │
+│ ⏱ Target: < 5µs for AST1060             │
+└──────┬───────────────────────────────────┘
+       │ Kernel Notification (sys_post)
+       ▼
+┌──────────────────────────────────────────┐
+│ Kernel                                   │
+│ - Unblocks client task                  │
+│ - Sets notification bit                 │
+└──────┬───────────────────────────────────┘
+       │ Task Wakeup
+       ▼
+┌──────────────────────────────────────────┐
+│ Client Application Task                  │
+│ - sys_recv_open() returns               │
+│ - Check sender == KERNEL                │
+│ - Check notification bit                │
+│ - Call get_slave_message()              │
+└──────┬───────────────────────────────────┘
+       │ IPC Request (get_slave_message)
+       ▼
+┌──────────────────────────────────────────┐
+│ I2C Driver Task (IPC Handler)           │
+│                                          │
+│ 1. Pop message from ring buffer         │
+│ 2. Copy to IPC lease                    │
+│ 3. Reply to client                      │
+└──────┬───────────────────────────────────┘
+       │ IPC Reply
+       ▼
+┌──────────────────────────────────────────┐
+│ Client Application Task                  │
+│ - Receives SlaveMessage                 │
+│ - Processes protocol (MCTP, etc.)       │
+│ - May send response via master mode     │
+└──────────────────────────────────────────┘
+```
+
+**Timeline:**
+```
+T=0µs      Master starts write to 0x1D
+T=~250µs   Transaction complete (32 bytes @ 400kHz)
+T=250µs    Hardware interrupt fires
+T=250µs    Kernel dispatches to driver
+T=251µs    Driver reads hardware buffer
+T=252µs    Driver buffers message
+T=253µs    Driver calls sys_post()
+T=253µs    Kernel unblocks client
+T=254µs    Client calls get_slave_message()
+T=256µs    Client receives message
+T=256µs+   Client processes message
+```
+
+**Key Latencies:**
+- Hardware to software buffer: ~3µs (critical path)
+- Software buffer to client: ~3µs (IPC overhead)
+- Total notification latency: ~6µs
+- Processing latency: Depends on protocol complexity
+
+== Buffering Strategy
+
+=== Why Software Buffering?
+
+**Problem:**
+```
+Time →
+
+Master         Driver                 Client
+  |              |                      |
+  | Write[Msg1]  |                      |
+  |------------->| Buffer Msg1          |
+  |              | sys_post()           |
+  |              |--------------------->|
+  | Write[Msg2]  |                      | (processing Msg1)
+  |------------->| Buffer Msg2          |
+  |              | (no notification)    |
+  | Write[Msg3]  |                      |
+  |------------->| Buffer Msg3          |
+  |              |                      |
+  |              |<---------------------|get_message() [Msg1]
+  |              |--------------------->|
+  |              |                      | (processing Msg1)
+  |              |<---------------------|get_message() [Msg2]
+  |              |--------------------->|
+  |              |                      | (processing Msg2)
+  |              |<---------------------|get_message() [Msg3]
+```
+
+Without buffering, messages would be lost while client processes previous message.
+
+=== Buffer Sizing
+
+**Formula:**
+```
+Buffer Size = (Message Rate × Processing Latency) + Burst Capacity
+```
+
+**Example Calculation:**
+```
+Message Rate: 100 messages/sec = 1 message per 10ms
+Processing Latency: 2ms per message
+Burst Capacity: 3 messages (safety margin)
+
+Buffer Size = (100 msg/s × 0.002s) + 3 = 0.2 + 3 ≈ 4 messages
+```
+
+**Recommendations:**
+- **Low Rate** (< 10 msg/s): 2-4 messages
+- **Medium Rate** (10-100 msg/s): 4-8 messages
+- **High Rate** (> 100 msg/s): 8-16 messages
+- **Burst Traffic**: Add safety margin based on max burst size
+
+**Platform Constraints:**
+```
+AST1060:  256KB RAM → can afford 8 messages per controller
+STM32H7:  1MB RAM → can afford 16 messages per controller
+LPC55:    256KB RAM → limit to 4-8 messages per controller
+```
+
+=== Buffer Overflow Policy
+
+**When buffer is full:**
+
+**Option 1: Drop Newest (Recommended)**
+```rust
+if buffer.is_full() {
+    drop_count += 1;
+    return; // Drop incoming message
+}
+```
+
+✅ Simple, predictable
+✅ Preserves oldest (potentially more important) messages
+❌ May lose latest state updates
+
+**Option 2: Drop Oldest**
+```rust
+if buffer.is_full() {
+    buffer.pop_front(); // Drop oldest
+}
+buffer.push_back(new_message);
+```
+
+✅ Always gets latest message
+❌ May lose important early messages
+❌ More complex
+
+**Option 3: Flow Control** (Hardware dependent)
+```rust
+if buffer.is_full() {
+    hardware.nack_next_transaction();
+}
+```
+
+✅ No message loss
+❌ Requires hardware support
+❌ May stall master
+
+**Recommended: Option 1 with protocol retry**
+- Protocol layer (MCTP, SMBus) handles retries
+- Simple driver implementation
+- Track drops for diagnostics
+
+== Notification Model
+
+=== Single Subscriber Pattern
+
+**Design Decision:** One task per controller/port can subscribe to notifications
+
+**Rationale:**
+1. **Simplicity**: Single `Option<(TaskId, u32)>` per controller
+2. **Clear Ownership**: One task owns slave mode per controller
+3. **Typical Usage**: Most systems have one protocol handler per bus
+4. **Multiple Controllers**: Different tasks can use different controllers
+
+**Example Architecture:**
+```
+┌──────────────────────┐
+│ I2C0 → Task A        │ (MCTP endpoint)
+│ I2C1 → Task A        │ (Secondary MCTP)
+│ I2C2 → Task B        │ (PMBus monitoring)
+│ I2C3 → (unused)      │
+└──────────────────────┘
+```
+
+**Multiple Tasks on Same Controller?**
+Use a dispatcher task:
+```
+I2C0 → Dispatcher Task → Routes to Task A or Task B based on message content
+```
+
+=== Notification vs Polling
+
+|===
+| Aspect | Notification (Recommended) | Polling (Deprecated)
+
+| Latency
+| Low (µs)
+| High (ms)
+
+| CPU Usage
+| Minimal (event-driven)
+| High (continuous polling)
+
+| Power
+| Efficient (sleep until event)
+| Inefficient (always active)
+
+| Complexity
+| Moderate (async handling)
+| Simple (sync loop)
+
+| Scalability
+| Good (multiple sources)
+| Poor (polling overhead)
+|===
+
+**When to use polling:**
+- Legacy code migration
+- Hardware without interrupt support
+- Extreme simplicity required
+
+**Recommended: Always use notifications for new code**
+
+== Protocol Integration
+
+=== MCTP-over-I2C
+
+**Management Component Transport Protocol**
+
+```rust
+// MCTP endpoint configuration
+const MCTP_EID: u8 = 0x1D; // Our endpoint ID
+
+device.configure_slave_address(MCTP_EID)?;
+device.enable_slave_receive()?;
+device.enable_slave_notification(MCTP_NOTIF)?;
+
+loop {
+    let msg = sys_recv_open(&mut buf, MCTP_NOTIF);
+    if let Ok(slave_msg) = device.get_slave_message() {
+        // Parse MCTP header
+        let mctp_hdr = parse_mctp_header(slave_msg.data());
+        
+        // Route based on message type
+        match mctp_hdr.message_type {
+            MCTP_TYPE_CONTROL => handle_control(mctp_hdr),
+            MCTP_TYPE_PLDM => handle_pldm(mctp_hdr),
+            MCTP_TYPE_NCSI => handle_ncsi(mctp_hdr),
+            _ => {} // Unknown
+        }
+    }
+}
+```
+
+**Key Requirements:**
+- Multi-packet message reassembly
+- Source address routing for responses
+- Timeout handling
+- Message fragmentation support
+
+=== PMBus/SMBus
+
+**Power Management Bus**
+
+```rust
+// PMBus device address
+const PMBUS_ADDR: u8 = 0x40;
+
+device.configure_slave_address(PMBUS_ADDR)?;
+device.enable_slave_receive()?;
+device.enable_slave_notification(PMBUS_NOTIF)?;
+
+loop {
+    let msg = sys_recv_open(&mut buf, PMBUS_NOTIF);
+    if let Ok(slave_msg) = device.get_slave_message() {
+        let cmd = slave_msg.data()[0]; // First byte is command
+        
+        match cmd {
+            PMBUS_READ_VOUT => send_voltage_reading(),
+            PMBUS_READ_IOUT => send_current_reading(),
+            PMBUS_READ_TEMPERATURE => send_temperature(),
+            _ => {} // Unsupported command
+        }
+    }
+}
+```
+
+**Key Requirements:**
+- Command/data protocol
+- Block read/write support
+- PEC (Packet Error Checking)
+- Alert response address
+
+=== Custom Protocols
+
+**General Pattern:**
+```rust
+device.configure_slave_address(custom_addr)?;
+device.enable_slave_receive()?;
+device.enable_slave_notification(NOTIF)?;
+
+loop {
+    let msg = sys_recv_open(&mut buf, NOTIF);
+    if let Ok(slave_msg) = device.get_slave_message() {
+        // Your protocol logic here
+        match parse_message(slave_msg.data()) {
+            Command::Read(reg) => send_register_value(reg),
+            Command::Write(reg, val) => write_register(reg, val),
+            Command::Status => send_status(),
+        }
+    }
+}
+```
+
+== Error Handling
+
+=== Error Categories
+
+**Configuration Errors:**
+- Invalid slave address (reserved, out of range)
+- Slave address already in use
+- Hardware doesn't support slave mode
+
+**Runtime Errors:**
+- Buffer overflow (messages dropped)
+- Bus errors during receive
+- Hardware malfunction
+
+**Protocol Errors:**
+- Invalid message format
+- Unexpected message type
+- Timeout waiting for continuation
+
+=== Error Recovery
+
+**Buffer Overflow:**
+```rust
+let status = device.get_slave_status(Controller::I2C0)?;
+if status.messages_dropped > acceptable_threshold {
+    log_error!("I2C0 dropping messages, rate too high");
+    // Consider:
+    // - Increasing buffer size
+    // - Optimizing processing speed
+    // - Adding flow control
+}
+```
+
+**Bus Errors:**
+```rust
+match device.get_slave_message() {
+    Err(ResponseCode::BusError) => {
+        // Reset bus
+        device.reset_bus()?;
+        
+        // Reconfigure slave
+        device.configure_slave_address(addr)?;
+        device.enable_slave_receive()?;
+    }
+    _ => {}
+}
+```
+
+**Hardware Reset:**
+```rust
+// If hardware becomes unresponsive
+device.disable_slave_receive()?;
+device.reset_bus()?;
+// Wait for bus idle
+device.configure_slave_address(addr)?;
+device.enable_slave_receive()?;
+device.enable_slave_notification(mask)?;
+```
+
+== Performance Characteristics
+
+=== Latency Targets
+
+|===
+| Metric | Target | Notes
+
+| Interrupt to buffer
+| < 5µs
+| Critical path, hardware dependent
+
+| Buffer to notification
+| < 1µs
+| sys_post() overhead
+
+| Notification to client
+| < 10µs
+| Kernel scheduling latency
+
+| IPC get_message
+| < 5µs
+| Ring buffer pop + IPC
+
+| **Total latency**
+| **< 25µs**
+| Interrupt to message in client
+|===
+
+=== Throughput Limits
+
+**Hardware Limit:**
+```
+At 400 kHz I2C:
+- 32 bytes in ~250µs
+- Max rate: 4000 messages/sec (theoretical)
+```
+
+**Software Limit:**
+```
+With 5µs interrupt handler:
+- Can handle back-to-back messages
+- Limited by IPC processing time
+- Typical: 1000-2000 messages/sec
+```
+
+**Practical Throughput:**
+```
+MCTP: 100-500 messages/sec
+PMBus: 10-100 messages/sec
+Custom: Depends on protocol complexity
+```
+
+=== Memory Footprint
+
+**Per Controller (8-message buffer):**
+```
+SlaveState struct:
+  - message_queue: 8 × 257 bytes = 2056 bytes
+  - metadata: ~32 bytes
+  - Total: ~2088 bytes
+
+For 2 active controllers: ~4176 bytes (~1.6% of 256KB)
+```
+
+**Scaling:**
+```
+Small system (1 slave): ~2KB
+Medium system (2-3 slaves): ~6KB
+Large system (5+ slaves): ~10KB+
+```
+
+== Testing Strategy
+
+=== Unit Testing
+
+**Mock Hardware:**
+```rust
+#[test]
+fn test_slave_receive() {
+    let mut driver = MockI2cDriver::new();
+    
+    // Configure slave
+    driver.configure_slave_mode(config)?;
+    driver.enable_slave_receive()?;
+    
+    // Inject test message
+    driver.inject_message(&test_data);
+    
+    // Retrieve and verify
+    let msg = driver.poll_slave_messages(&mut buf)?;
+    assert_eq!(msg.data(), test_data);
+}
+```
+
+=== Integration Testing
+
+**Loopback Test:**
+```rust
+// One task as master, another as slave
+// Task A: Master writes to address
+// Task B: Slave receives and verifies
+```
+
+**External Master:**
+```rust
+// Use external I2C master (Linux, test fixture)
+// Send test patterns
+// Verify slave receives correctly
+```
+
+=== Performance Testing
+
+**Latency Measurement:**
+```rust
+// Timestamp at interrupt entry
+// Timestamp at client receive
+// Measure difference
+```
+
+**Throughput Testing:**
+```rust
+// Send messages at increasing rate
+// Measure when drops start occurring
+// Find maximum sustainable rate
+```
+
+**Stress Testing:**
+```rust
+// Burst traffic patterns
+// Verify no message corruption
+// Check buffer overflow handling
+```
+
+== Migration Guide
+
+=== From Polling to Notifications
+
+**Before (Polling):**
+```rust
+loop {
+    // Inefficient polling
+    if let Ok(msg) = device.check_slave_buffer(&mut buf) {
+        process_message(msg);
+    }
+    sleep_ms(10); // Wastes time
+}
+```
+
+**After (Notifications):**
+```rust
+device.enable_slave_notification(0x0001)?;
+
+loop {
+    let msg = sys_recv_open(&mut buf, 0x0001);
+    if msg.sender == TaskId::KERNEL {
+        if let Ok(slave_msg) = device.get_slave_message() {
+            process_message(slave_msg);
+        }
+    }
+}
+```
+
+**Benefits:**
+- Lower latency: 25µs vs 10ms
+- Lower CPU usage: Event-driven vs polling
+- Better power: Sleep when idle
+
+=== From Other I2C Frameworks
+
+**Bare Metal:**
+- Add task-based structure
+- Replace direct interrupt handling with notifications
+- Use IPC instead of direct calls
+
+**Arduino/Embedded:**
+- Replace callbacks with notification loop
+- Add proper error handling
+- Use Hubris memory safety
+
+**Linux I2C Slave:**
+- Similar concepts (callback on receive)
+- Replace with notification-based model
+- More explicit buffer management
+
+== Conclusion
+
+I2C slave mode support in Hubris provides:
+
+✅ **Low Latency**: µs-scale notification delivery
+✅ **Safe Buffering**: Messages queued without loss (up to buffer limit)
+✅ **Hardware Agnostic**: Uniform API across platforms
+✅ **Power Efficient**: Interrupt-driven, sleep when idle
+✅ **Protocol Neutral**: Support any I2C-based protocol
+✅ **Type Safe**: Rust memory safety guarantees
+
+**Architecture Goals Achieved:**
+1. Application simplicity (high-level API)
+2. Hardware flexibility (trait abstraction)
+3. Performance (interrupt-driven)
+4. Safety (task isolation, buffering)
+5. Maintainability (clear layering)
+
+**Next Steps:**
+1. Review link:ast1060-i2c-implementation-guide.adoc[Implementation Guide] for hardware-specific details
+2. Review link:i2c-buffer-management.adoc[Buffer Management] for buffering strategies
+3. Review link:i2c-api.adoc[API Specification] for detailed API reference
+4. Implement hardware adapter for your platform
+5. Write integration tests
+6. Deploy and monitor in production
+
+This architecture supports current needs while remaining flexible for future protocol requirements and hardware platforms.
