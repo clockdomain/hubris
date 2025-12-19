@@ -1,9 +1,14 @@
-//! Mock I2C Server - Embedded Binary
+//! I2C Server - Embedded Binary
 //!
-//! This is the embedded binary entry point for the mock I2C server driver.
-//! 
-//! This implementation uses manual IPC handling (like the UART driver) to support
-//! timer notifications for injecting test slave messages asynchronously.
+//! This is a vendor-agnostic I2C server that works with any hardware
+//! implementing the I2cHardware trait. Hardware vendors integrate by adding
+//! their driver module under hardware/<vendor>/ without modifying this file.
+//!
+//! The server provides a standard IPC interface for I2C operations including:
+//! - Master mode read/write/write-read transactions
+//! - Slave mode configuration and operation
+//! - Bus error recovery
+//! - Notification-based async operation
 
 #![no_std]
 #![no_main]
@@ -12,12 +17,16 @@ use drv_i2c_api::*;
 use drv_i2c_types::{traits::I2cHardware, Op, ResponseCode, SlaveMessage};
 
 use userlib::{LeaseAttributes, sys_recv_open, sys_reply, sys_borrow_info, 
-              sys_borrow_read, sys_borrow_write, sys_post, set_timer_relative, 
+              sys_borrow_read, sys_borrow_write, sys_post, 
               TaskId, RecvMessage, FromPrimitive};
 use ringbuf::*;
 
-mod mock_driver;
-use mock_driver::MockI2cDriver;
+// Hardware abstraction - vendors add their implementation here
+mod hardware;
+
+// Hardware-specific driver implementations (conditionally compiled)
+#[cfg(feature = "ast1060")]
+mod hardware_driver;
 
 #[derive(Copy, Clone, PartialEq, Count)]
 enum Trace {
@@ -31,45 +40,21 @@ enum Trace {
 
 counted_ringbuf!(Trace, 64, Trace::None);
 
-// Timer configuration for injecting test slave messages
-const TIMER_INTERVAL_MS: u32 = 100;  // Generate test message every 100ms
-// Notification bit must match app.toml: notifications = ["i2c-irq", "timer"]
-// Position 1 (timer) → bit 1 (0x0002)
-const TIMER_NOTIF: u32 = 0x0002;      // Timer notification bit
-
 #[export_name = "main"]
 fn main() -> ! {
-    // Create Mock I2C driver on the stack for IPC testing
-    let mut driver = MockI2cDriver::new();
+    // Create hardware-specific I2C driver
+    // The hardware module dispatches to the correct vendor implementation
+    // based on enabled feature flags (ast1060, stm32, lpc55, etc.)
+    let mut driver = hardware::create_driver();
     
-    // State for notification-driven slave message injection
+    // State for notification-driven slave message delivery
     let mut notification_client: Option<(TaskId, u32)> = None;
-    let mut timer_armed: bool = false;
 
     // Message buffer for IPC
     let mut buffer = [0u8; 4];
 
     loop {
-        let msginfo = sys_recv_open(&mut buffer, TIMER_NOTIF);
-        
-        // Handle timer notification - inject slave message
-        if msginfo.sender == TaskId::KERNEL {
-            if msginfo.operation & TIMER_NOTIF != 0 {
-                if let Some((client_task, notif_mask)) = notification_client {
-                    // Inject a test slave message
-                    if driver.inject_slave_message().is_ok() {
-                        // Notify the client that a message is available
-                        sys_post(client_task, notif_mask);
-                    }
-                    
-                    // Re-arm timer for next message if still enabled
-                    if timer_armed {
-                        set_timer_relative(TIMER_INTERVAL_MS, TIMER_NOTIF);
-                    }
-                }
-            }
-            continue;
-        }
+        let msginfo = sys_recv_open(&mut buffer, 0);
         
         // Decode operation
         let op = match Op::from_u32(msginfo.operation) {
@@ -81,17 +66,16 @@ fn main() -> ! {
         };
         
         // Handle IPC operation
-        handle_operation(op, &msginfo, &mut buffer, &mut driver, &mut notification_client, &mut timer_armed);
+        handle_operation(op, &msginfo, &mut buffer, &mut driver, &mut notification_client);
     }
 }
 
-fn handle_operation(
+fn handle_operation<D: I2cHardware>(
     op: Op,
     msginfo: &RecvMessage,
     buffer: &mut [u8],
-    driver: &mut MockI2cDriver,
+    driver: &mut D,
     notification_client: &mut Option<(TaskId, u32)>,
-    timer_armed: &mut bool,
 ) {
     match op {
         Op::WriteRead | Op::WriteReadBlock => {
@@ -107,22 +91,23 @@ fn handle_operation(
             handle_disable_slave_receive(msginfo, buffer, driver);
         }
         Op::EnableSlaveNotification => {
-            handle_enable_slave_notification(msginfo, buffer, notification_client, timer_armed);
+            handle_enable_slave_notification(msginfo, buffer, notification_client);
         }
         Op::DisableSlaveNotification => {
-            handle_disable_slave_notification(msginfo, notification_client, timer_armed);
+            handle_disable_slave_notification(msginfo, notification_client);
         }
         Op::GetSlaveMessage => {
-            handle_get_slave_message(msginfo, buffer, driver);
+            // Slave message polling not supported - use interrupt-driven notification instead
+            sys_reply(msginfo.sender, ResponseCode::BadArg as u32, &[]);
         }
     }
 }
 
-fn handle_write_read(
+fn handle_write_read<D: I2cHardware>(
     op: Op,
     msginfo: &RecvMessage,
     buffer: &[u8],
-    driver: &mut MockI2cDriver,
+    driver: &mut D,
 ) {
     let lease_count = msginfo.lease_count;
     
@@ -202,7 +187,8 @@ fn handle_write_read(
             match driver.write_read_block(controller, addr, &write_data[..winfo.len], read_slice) {
                 Ok(n) => n,
                 Err(e) => {
-                    sys_reply(msginfo.sender, e as u32, &[]);
+                    let rc: ResponseCode = e.into();
+                    sys_reply(msginfo.sender, rc as u32, &[]);
                     return;
                 }
             }
@@ -210,7 +196,8 @@ fn handle_write_read(
             match driver.write_read(controller, addr, &write_data[..winfo.len], read_slice) {
                 Ok(n) => n,
                 Err(e) => {
-                    sys_reply(msginfo.sender, e as u32, &[]);
+                    let rc: ResponseCode = e.into();
+                    sys_reply(msginfo.sender, rc as u32, &[]);
                     return;
                 }
             }
@@ -231,10 +218,10 @@ fn handle_write_read(
     sys_reply(msginfo.sender, 0, &total.to_le_bytes());
 }
 
-fn handle_configure_slave_address(
+fn handle_configure_slave_address<D: I2cHardware>(
     msginfo: &RecvMessage,
     buffer: &[u8],
-    driver: &mut MockI2cDriver,
+    driver: &mut D,
 ) {
     if msginfo.message_len < 4 {
         sys_reply(msginfo.sender, ResponseCode::BadArg as u32, &[]);
@@ -261,14 +248,17 @@ fn handle_configure_slave_address(
     
     match driver.configure_slave_mode(controller, &config) {
         Ok(()) => sys_reply(msginfo.sender, 0, &[]),
-        Err(e) => sys_reply(msginfo.sender, e as u32, &[]),
+        Err(e) => {
+            let rc: ResponseCode = e.into();
+            sys_reply(msginfo.sender, rc as u32, &[]);
+        }
     }
 }
 
-fn handle_enable_slave_receive(
+fn handle_enable_slave_receive<D: I2cHardware>(
     msginfo: &RecvMessage,
     buffer: &[u8],
-    driver: &mut MockI2cDriver,
+    driver: &mut D,
 ) {
     if msginfo.message_len < 4 {
         sys_reply(msginfo.sender, ResponseCode::BadArg as u32, &[]);
@@ -286,14 +276,17 @@ fn handle_enable_slave_receive(
     
     match driver.enable_slave_receive(controller) {
         Ok(()) => sys_reply(msginfo.sender, 0, &[]),
-        Err(e) => sys_reply(msginfo.sender, e as u32, &[]),
+        Err(e) => {
+            let rc: ResponseCode = e.into();
+            sys_reply(msginfo.sender, rc as u32, &[]);
+        }
     }
 }
 
-fn handle_disable_slave_receive(
+fn handle_disable_slave_receive<D: I2cHardware>(
     msginfo: &RecvMessage,
     buffer: &[u8],
-    driver: &mut MockI2cDriver,
+    driver: &mut D,
 ) {
     if msginfo.message_len < 4 {
         sys_reply(msginfo.sender, ResponseCode::BadArg as u32, &[]);
@@ -311,7 +304,10 @@ fn handle_disable_slave_receive(
     
     match driver.disable_slave_receive(controller) {
         Ok(()) => sys_reply(msginfo.sender, 0, &[]),
-        Err(e) => sys_reply(msginfo.sender, e as u32, &[]),
+        Err(e) => {
+            let rc: ResponseCode = e.into();
+            sys_reply(msginfo.sender, rc as u32, &[]);
+        }
     }
 }
 
@@ -319,7 +315,6 @@ fn handle_enable_slave_notification(
     msginfo: &RecvMessage,
     buffer: &[u8],
     notification_client: &mut Option<(TaskId, u32)>,
-    timer_armed: &mut bool,
 ) {
     if msginfo.message_len < 4 {
         sys_reply(msginfo.sender, ResponseCode::BadArg as u32, &[]);
@@ -356,10 +351,8 @@ fn handle_enable_slave_notification(
     }
     let notif_mask = u32::from_le_bytes(mask_bytes);
     
-    // Store client info and start timer
+    // Store client info for notification delivery
     *notification_client = Some((msginfo.sender, notif_mask));
-    *timer_armed = true;
-    set_timer_relative(TIMER_INTERVAL_MS, TIMER_NOTIF);
     
     sys_reply(msginfo.sender, 0, &[]);
 }
@@ -367,81 +360,11 @@ fn handle_enable_slave_notification(
 fn handle_disable_slave_notification(
     msginfo: &RecvMessage,
     notification_client: &mut Option<(TaskId, u32)>,
-    timer_armed: &mut bool,
 ) {
-    // Clear notification state and stop timer
+    // Clear notification state
     *notification_client = None;
-    *timer_armed = false;
-    
-    // Cancel any pending timer
-    use userlib::sys_set_timer;
-    sys_set_timer(None, TIMER_NOTIF);
     
     sys_reply(msginfo.sender, 0, &[]);
-}
-
-fn handle_get_slave_message(
-    msginfo: &RecvMessage,
-    buffer: &[u8],
-    driver: &mut MockI2cDriver,
-) {
-    if msginfo.message_len < 4 {
-        sys_reply(msginfo.sender, ResponseCode::BadArg as u32, &[]);
-        return;
-    }
-    
-    let payload: [u8; 4] = [buffer[0], buffer[1], buffer[2], buffer[3]];
-    let (_address, controller, _port, _segment) = match Marshal::unmarshal(&payload) {
-        Ok(vals) => vals,
-        Err(e) => {
-            sys_reply(msginfo.sender, e as u32, &[]);
-            return;
-        }
-    };
-    
-    // Check that we have a lease for returning the message
-    if msginfo.lease_count < 1 {
-        sys_reply(msginfo.sender, ResponseCode::BadArg as u32, &[]);
-        return;
-    }
-    
-    // Try to get a message from the driver
-    let mut messages = [SlaveMessage::default(); 1];
-    match driver.poll_slave_messages(controller, &mut messages) {
-        Ok(1) => {
-            // Message available - write to lease
-            let slave_msg = &messages[0];
-            
-            // Write: source_address (1 byte) + data_length (1 byte) + data
-            let mut write_buf = [0u8; 257]; // max: 2 + 255
-            write_buf[0] = slave_msg.source_address;
-            write_buf[1] = slave_msg.data_length;
-            write_buf[2..2 + slave_msg.data_length as usize]
-                .copy_from_slice(&slave_msg.data[..slave_msg.data_length as usize]);
-            
-            let total_len = 2 + slave_msg.data_length as usize;
-            for i in 0..total_len {
-                let (rc, _) = sys_borrow_write(msginfo.sender, 0, i, &write_buf[i..i+1]);
-                if rc != 0 {
-                    sys_reply(msginfo.sender, rc, &[]);
-                    return;
-                }
-            }
-            
-            sys_reply(msginfo.sender, 0, &total_len.to_le_bytes());
-        }
-        Ok(0) => {
-            // No message available
-            sys_reply(msginfo.sender, ResponseCode::NoSlaveMessage as u32, &[]);
-        }
-        Ok(_) => {
-            // Unexpected count
-            sys_reply(msginfo.sender, ResponseCode::BadResponse as u32, &[]);
-        }
-        Err(e) => {
-            sys_reply(msginfo.sender, e as u32, &[]);
-        }
-    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/notifications.rs"));

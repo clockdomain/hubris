@@ -188,7 +188,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ast1060-i2c-scaffold"
+name = "ast1060-i2c-example"
 version = "0.1.0"
 dependencies = [
  "ast1060-pac",
@@ -1105,6 +1105,22 @@ dependencies = [
  "const-oid",
  "crypto-common",
  "subtle",
+]
+
+[[package]]
+name = "drv-ast1060-i2c"
+version = "0.1.0"
+dependencies = [
+ "ast1060-pac",
+ "bitfield 0.13.2",
+ "build-util",
+ "counters",
+ "drv-i2c-api",
+ "drv-i2c-types",
+ "ringbuf",
+ "userlib",
+ "zerocopy 0.8.27",
+ "zerocopy-derive 0.8.27",
 ]
 
 [[package]]
@@ -2037,25 +2053,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "drv-mock-i2c"
-version = "0.1.0"
-dependencies = [
- "bitfield 0.13.2",
- "build-util",
- "cortex-m",
- "counters",
- "drv-i2c-api",
- "drv-i2c-types",
- "embedded-hal 0.2.6",
- "fixedmap",
- "heapless 0.7.17",
- "ringbuf",
- "userlib",
- "zerocopy 0.8.27",
- "zerocopy-derive 0.8.27",
-]
-
-[[package]]
 name = "drv-monorail-api"
 version = "0.1.0"
 dependencies = [
@@ -2120,6 +2117,27 @@ dependencies = [
  "idol-runtime",
  "num-traits",
  "openprot-hal-blocking 0.1.0 (git+https://github.com/rusty1968/openprot.git?branch=i2c-hardware)",
+ "userlib",
+ "zerocopy 0.8.27",
+ "zerocopy-derive 0.8.27",
+]
+
+[[package]]
+name = "drv-openprot-i2c-server"
+version = "0.1.0"
+dependencies = [
+ "ast1060-pac",
+ "bitfield 0.13.2",
+ "build-util",
+ "cortex-m",
+ "counters",
+ "drv-ast1060-i2c",
+ "drv-i2c-api",
+ "drv-i2c-types",
+ "embedded-hal 0.2.6",
+ "fixedmap",
+ "heapless 0.7.17",
+ "ringbuf",
  "userlib",
  "zerocopy 0.8.27",
  "zerocopy-derive 0.8.27",

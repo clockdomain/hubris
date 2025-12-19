@@ -1,10 +1,10 @@
 [package]
-name = "drv-mock-i2c"
+name = "drv-openprot-i2c-server"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "drv-mock-i2c"
+name = "drv-openprot-i2c-server"
 path = "src/main.rs"
 
 
@@ -23,10 +23,26 @@ counters = { path = "../../lib/counters" }
 userlib = { path = "../../sys/userlib" }
 fixedmap = { path = "../../lib/fixedmap" }
 
+# Hardware vendor dependencies (conditionally compiled)
+# Each vendor adds their dependencies with optional = true
+drv-ast1060-i2c = { path = "../ast1060-i2c", optional = true }
+ast1060-pac = { workspace = true, optional = true }
+
+# Future vendors would add:
+# drv-stm32-i2c = { path = "../stm32-i2c", optional = true }
+# stm32-pac = { ... , optional = true }
+
 [features]
-default = ["mock-only"]
-mock-only = []
-hardware = []  # Enable this for real hardware builds
+# Default: AST1060 hardware (can be changed based on target platform)
+default = ["ast1060"]
+
+# Hardware vendor features (mutually exclusive - select one)
+ast1060 = ["drv-ast1060-i2c", "ast1060-pac"]
+# Future: stm32 = ["drv-stm32-i2c", "stm32-pac"]
+# Future: lpc55 = ["drv-lpc55-i2c", "lpc55-pac"]
+
+# Functional features (work with any hardware)
+slave = ["drv-ast1060-i2c?/slave"]  # Pass through slave feature to hardware driver
 
 [build-dependencies]
 build-util = { path = "../../build/util" }

@@ -400,6 +400,14 @@ pub enum Segment {
     S16 = 16,
 }
 
+impl Segment {
+    /// Convert segment enum to its numeric index value
+    #[inline]
+    pub const fn to_index(self) -> u8 {
+        self as u8
+    }
+}
+
 /// Represents a message received while operating in I2C slave mode
 ///
 /// When the I2C controller is configured as a slave, it can receive messages

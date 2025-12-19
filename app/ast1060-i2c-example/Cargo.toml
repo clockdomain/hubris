@@ -1,7 +1,7 @@
 [package]
 edition = "2021"
 readme = "README.md"
-name = "ast1060-i2c-scaffold"
+name = "ast1060-i2c-example"
 version = "0.1.0"
 
 [features]
@@ -16,6 +16,7 @@ kern = { path = "../../sys/kern" }
 
 # this lets you use `cargo fix`!
 [[bin]]
-name = "ast1060-i2c-scaffold"
+name = "ast1060-i2c-example"
+path = "src/main.rs"
 test = false
 bench = false

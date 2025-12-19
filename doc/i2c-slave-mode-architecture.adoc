@@ -703,18 +703,7 @@ fn test_slave_receive() {
 
 === From Polling to Notifications
 
-**Before (Polling):**
-```rust
-loop {
-    // Inefficient polling
-    if let Ok(msg) = device.check_slave_buffer(&mut buf) {
-        process_message(msg);
-    }
-    sleep_ms(10); // Wastes time
-}
-```
-
-**After (Notifications):**
+**Recommended Pattern (Interrupt-Driven):**
 ```rust
 device.enable_slave_notification(0x0001)?;
 

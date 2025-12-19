@@ -4,6 +4,11 @@
 # system-on-chip, including base addresses, register region sizes, and interrupt 
 # assignments for use with the Hubris operating system.
 
+# System Control Unit - chip-level clock and reset control
+[scu]
+address = 0x7e6e2000
+size = 0x1000
+
 # Hardware Security Engine - cryptographic acceleration
 [hace_controller]
 address = 0x7e6d0000

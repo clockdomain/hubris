@@ -7,7 +7,7 @@
 set -e
 
 # Configuration
-APP_NAME="ast1060-i2c-scaffold"
+APP_NAME="ast1060-i2c-example"
 IMAGE_NAME="default"
 BUILD_DIR="target/${APP_NAME}/dist/${IMAGE_NAME}"
 FIRMWARE_PATH="${BUILD_DIR}/final.bin"

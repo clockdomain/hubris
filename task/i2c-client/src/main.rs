@@ -141,12 +141,13 @@ fn run_slave_mode_tests(device: &I2cDevice) {
     uart_send(if enable_result.is_ok() { b"PASS\r\n" } else { b"FAIL\r\n" });
     ringbuf_entry!(Trace::SlaveOpResult(2, enable_result.is_ok()));
     
-    // Test 3: Check slave buffer (should work even if no messages)
-    uart_send(b"  Test 3: check_slave_buffer... ");
-    let mut slave_buffer = [0u8; 64];
-    let check_result = device.check_slave_buffer(&mut slave_buffer);
-    uart_send(if check_result.is_ok() { b"PASS\r\n" } else { b"FAIL\r\n" });
-    ringbuf_entry!(Trace::SlaveOpResult(3, check_result.is_ok()));
+    // Test 3: Get slave message (may return NoSlaveMessage if none available)
+    uart_send(b"  Test 3: get_slave_message... ");
+    let check_result = device.get_slave_message();
+    // Either Ok or NoSlaveMessage is acceptable
+    let pass = check_result.is_ok() || matches!(check_result, Err(ResponseCode::NoSlaveMessage));
+    uart_send(if pass { b"PASS\r\n" } else { b"FAIL\r\n" });
+    ringbuf_entry!(Trace::SlaveOpResult(3, pass));
     
     // Test 4: Disable slave receive mode
     uart_send(b"  Test 4: disable_slave_receive... ");

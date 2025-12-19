@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2024 Advanced Micro Devices, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name = "ast1060-i2c-example"
+target = "thumbv7em-none-eabihf"
+board = "ast1060-rot"
+chip = "../../chips/ast1060"
+stacksize = 1024 
+
+[kernel]
+name = "ast1060-i2c-example"
+requires = {flash = 20000, ram = 3072}
+
+[tasks.jefe]
+name = "task-jefe"
+priority = 0
+max-sizes = {flash = 8192, ram = 4096}
+start = true
+stacksize = 1536
+notifications = ["fault", "timer"]
+
+[tasks.idle]
+name = "task-idle"
+priority = 5
+max-sizes = {flash = 128, ram = 256}
+stacksize = 256
+start = true
+
+[tasks.i2c]
+name = "drv-openprot-i2c-server"
+priority = 3
+max-sizes = {flash = 16384, ram = 4096}
+start = true
+features = ["ast1060", "slave"]  # Enable AST1060 hardware + slave mode
+stacksize = 2048
+# Note: AST1060 has 14 I2C controllers, but MPU only supports 7 regions per task
+# For testing, include SCU (for clock/reset), i2c_global (for timing), and first I2C controller
+uses = ["scu", "i2c_global", "i2c0", "i2c_buffer0"]
+notifications = ["i2c-irq"]
+
+[tasks.i2c.interrupts]
+"i2c0.irq" = "i2c-irq"
+
+[tasks.i2c_client]
+name = "task-i2c-client"
+priority = 4
+max-sizes = {flash = 8192, ram = 2048}
+start = true
+stacksize = 1024
+task-slots = ["i2c", "uart_driver"]
+
+[tasks.uart_driver]
+name = "drv-ast1060-uart"
+priority = 2
+max-sizes = {flash = 8192, ram = 2048}
+uses = ["uart"]
+start = true
+notifications = ["uart-irq"]
+interrupts = {"uart.irq" = "uart-irq"}

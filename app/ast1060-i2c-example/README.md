@@ -26,7 +26,7 @@ cargo xtask build app/ast1060-i2c-scaffold/app.toml
 
 Build with JTAG halt for debugging:
 ```bash
-cargo xtask build app/ast1060-i2c-scaffold/app.toml --feature jtag-halt
+cargo xtask build app/ast1060-i2c-example/app.toml --feature jtag-halt
 ```
 
 ## I2C Testing

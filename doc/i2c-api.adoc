@@ -420,38 +420,6 @@ Stop slave mode operation.
 pub fn disable_slave_receive(&self) -> Result<(), ResponseCode>
 ----
 
-=== Deprecated Methods
-
-==== check_slave_buffer()
-
-**DEPRECATED**: Use `get_slave_message()` with notifications instead.
-
-[source,rust]
-----
-#[deprecated(since = "0.2.0")]
-pub fn check_slave_buffer(&self, buffer: &mut [u8]) -> Result<usize, ResponseCode>
-----
-
-**Why Deprecated:**
-- Requires polling (inefficient)
-- High latency
-- Wastes CPU cycles
-- Poor power efficiency
-
-==== get_slave_messages()
-
-**DEPRECATED**: Use `get_slave_message()` directly.
-
-[source,rust]
-----
-#[deprecated(since = "0.2.0")]
-pub fn get_slave_messages(&self, messages: &mut [SlaveMessage]) -> Result<usize, ResponseCode>
-----
-
-**Why Deprecated:**
-- Polling-based
-- Multi-message retrieval not needed with notifications
-
 == Error Codes
 
 Defined in link:../drv/i2c-types/src/lib.rs[`drv/i2c-types/src/lib.rs`]:
