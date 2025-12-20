@@ -5,8 +5,10 @@
 //! I2C Client Test Task
 //!
 //! This task exercises all available I2C IPC operations to validate the
-//! mock I2C server implementation. It tests both master mode operations
+//! I2C server implementation. It tests both master mode operations
 //! and slave mode operations for comprehensive protocol validation.
+//!
+//! Includes Aardvark hardware bringup tests - see AARDVARK-BRINGUP.md
 
 #![no_std]
 #![no_main]
@@ -14,6 +16,8 @@
 use drv_i2c_api::{I2cDevice, ResponseCode, Controller, PortIndex};
 use userlib::*;
 use ringbuf::*;
+
+mod aardvark;
 
 task_slot!(I2C, i2c);
 task_slot!(UART, uart_driver);
@@ -45,6 +49,9 @@ fn main() -> ! {
     uart_send(b"Testing all I2C IPC operations...\r\n\r\n");
     
     let device = I2cDevice::new(i2c_task, TEST_CONTROLLER, TEST_PORT, None, TEST_DEVICE_ADDR, "i2c-client");
+
+    // Run Aardvark bringup tests once at startup
+    aardvark::run_aardvark_tests(&device);
 
     loop {
         // Run comprehensive I2C tests

@@ -56,9 +56,9 @@ notifications = ["i2c-irq"]
 [tasks.i2c_client]
 name = "task-i2c-client"
 priority = 4
-max-sizes = {flash = 8192, ram = 2048}
+max-sizes = {flash = 16384, ram = 4096}  # Increased for Aardvark test suite
 start = true
-stacksize = 1024
+stacksize = 2048  # Increased for slave mode tests
 task-slots = ["i2c", "uart_driver"]
 
 [tasks.uart_driver]
