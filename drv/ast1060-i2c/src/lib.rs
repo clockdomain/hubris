@@ -15,6 +15,7 @@ mod controller;
 mod error;
 mod master;
 mod mux;
+mod pinmux;
 mod recovery;
 mod timing;
 mod transfer;
@@ -26,6 +27,7 @@ pub use constants::*;
 pub use controller::*;
 pub use error::*;
 pub use mux::*;
+pub use pinmux::*;
 
 pub use server_driver::*;
 pub use slave::*;

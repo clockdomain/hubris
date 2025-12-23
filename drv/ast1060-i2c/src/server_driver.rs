@@ -11,9 +11,6 @@ use ast1060_pac;
 use drv_i2c_api::*;
 use drv_i2c_types::{traits::I2cHardware, ResponseCode, SlaveConfig};
 
-/// Maximum number of I2C controllers on AST1060
-const MAX_CONTROLLERS: usize = 14;
-
 /// Safe wrapper for AST1060 I2C peripherals
 ///
 /// This type owns the peripherals and provides safe access to all 14 I2C controllers.

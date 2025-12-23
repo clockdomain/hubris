@@ -11,9 +11,6 @@
 use crate::uart_send;
 use drv_i2c_api::{I2cDevice, ResponseCode};
 
-/// Aardvark slave address for testing
-const AARDVARK_ADDR: u8 = 0x50;
-
 /// AST1060 slave address for slave mode tests
 const AST1060_SLAVE_ADDR: u8 = 0x42;
 
@@ -363,7 +360,6 @@ fn test_8_slave_receive(device: &I2cDevice) {
         super::notifications::SLAVE_RX_MASK | super::notifications::TIMER_MASK,
     );
 
-    let mut received = false;
     if msginfo.sender == TaskId::KERNEL {
         if (msginfo.operation & super::notifications::SLAVE_RX_MASK) != 0 {
             // Notification received! Get the message
@@ -396,7 +392,6 @@ fn test_8_slave_receive(device: &I2cDevice) {
                         uart_send(b"  \xE2\x9C\x93 Data matches expected pattern!\r\n");
                     }
 
-                    received = true;
                     uart_send(b"  PASS\r\n\r\n");
                 }
                 Err(ResponseCode::NoSlaveMessage) => {

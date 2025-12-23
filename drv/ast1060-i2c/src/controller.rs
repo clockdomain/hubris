@@ -13,6 +13,8 @@ pub struct Ast1060I2c<'a> {
     pub(crate) xfer_mode: I2cXferMode,
     multi_master: bool,
     smbus_alert: bool,
+    /// Bus recovery enabled (currently unused, reserved for future use)
+    #[allow(dead_code)]
     bus_recover: bool,
 
     // Transfer state (visible to transfer/master modules)
@@ -62,6 +64,11 @@ impl<'a> Ast1060I2c<'a> {
 
     /// Initialize hardware
     fn init_hardware(&mut self, config: &I2cConfig) -> Result<(), I2cError> {
+        // Configure pins first - required for external communication
+        unsafe {
+            crate::pinmux::configure_i2c_pins(self.controller.controller)?;
+        }
+
         // Initialize I2C global registers (one-time init)
         init_i2c_global()?;
 
