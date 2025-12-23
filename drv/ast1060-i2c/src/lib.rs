@@ -19,16 +19,16 @@ mod recovery;
 mod timing;
 mod transfer;
 
-mod slave;
 mod server_driver;
+mod slave;
 
 pub use constants::*;
 pub use controller::*;
 pub use error::*;
 pub use mux::*;
 
-pub use slave::*;
 pub use server_driver::*;
+pub use slave::*;
 
 use drv_i2c_api::Controller;
 
@@ -66,9 +66,9 @@ impl Default for I2cConfig {
     fn default() -> Self {
         Self {
             xfer_mode: I2cXferMode::BufferMode,
-            speed: I2cSpeed::Fast,  // 400 kHz - MCTP standard
+            speed: I2cSpeed::Fast, // 400 kHz - MCTP standard
             multi_master: false,
-            smbus_timeout: true,  // Required for MCTP reliability
+            smbus_timeout: true, // Required for MCTP reliability
             smbus_alert: false,
         }
     }

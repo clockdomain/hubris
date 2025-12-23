@@ -1,7 +1,7 @@
 //! PCA9545 4-channel I2C multiplexer driver
 
-use crate::*;
 use super::I2cMuxDriver;
+use crate::*;
 
 /// PCA9545 4-channel mux (2-bit addressing)
 pub struct Pca9545;
@@ -15,7 +15,7 @@ impl I2cMuxDriver for Pca9545 {
         // PCA9545 doesn't need special configuration
         Ok(())
     }
-    
+
     fn set_segment(
         &self,
         mux: &I2cMux<'_>,
@@ -26,13 +26,13 @@ impl I2cMuxDriver for Pca9545 {
         if idx >= 4 {
             return Err(I2cError::Invalid);
         }
-        
+
         // PCA9545 uses one-hot encoding: bit N selects channel N
         let control_byte = 1u8 << idx;
-        
+
         i2c.write(mux.address, &[control_byte])
     }
-    
+
     fn reset(
         &self,
         mux: &I2cMux<'_>,

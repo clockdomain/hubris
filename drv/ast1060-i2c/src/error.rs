@@ -33,15 +33,17 @@ impl From<I2cError> for ResponseCode {
     fn from(err: I2cError) -> Self {
         match err {
             I2cError::NoAcknowledge => ResponseCode::NoDevice,
-            I2cError::Timeout => ResponseCode::ControllerBusy,  // Timeout maps to controller busy
+            I2cError::Timeout => ResponseCode::ControllerBusy, // Timeout maps to controller busy
             I2cError::Bus | I2cError::Busy | I2cError::BusRecoveryFailed => {
                 ResponseCode::BusLocked
             }
             I2cError::ArbitrationLoss => ResponseCode::BusError,
             I2cError::Overrun | I2cError::Invalid | I2cError::Abnormal => {
-                ResponseCode::TooMuchData  // Transfer size issues map to TooMuchData
+                ResponseCode::TooMuchData // Transfer size issues map to TooMuchData
             }
-            I2cError::SlaveError | I2cError::InvalidAddress => ResponseCode::BadArg,
+            I2cError::SlaveError | I2cError::InvalidAddress => {
+                ResponseCode::BadArg
+            }
         }
     }
 }

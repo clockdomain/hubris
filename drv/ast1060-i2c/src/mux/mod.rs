@@ -16,7 +16,7 @@ pub trait I2cMuxDriver {
         mux: &I2cMux<'_>,
         i2c: &mut Ast1060I2c<'_>,
     ) -> Result<(), I2cError>;
-    
+
     /// Set active segment
     fn set_segment(
         &self,
@@ -24,7 +24,7 @@ pub trait I2cMuxDriver {
         i2c: &mut Ast1060I2c<'_>,
         segment: drv_i2c_api::Segment,
     ) -> Result<(), I2cError>;
-    
+
     /// Reset the mux (disable all segments)
     fn reset(
         &self,
