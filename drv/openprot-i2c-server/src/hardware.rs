@@ -1,46 +1,30 @@
 //! Hardware-specific driver selection
-//! 
-//! This module provides a vendor-agnostic interface for creating I2C drivers.
-//! Hardware vendors integrate their implementation by:
-//! 1. Creating a module under hardware/<vendor>/
-//! 2. Implementing create_driver() that returns their driver type
-//! 3. Adding a feature flag and conditional compilation
 //!
-//! The main server code remains unchanged - vendors only add their module.
+//! The server is generic over I2cHardware trait. Vendor-specific drivers
+//! live in their own crates (drv-ast1060-i2c, drv-stm32-i2c, etc.) and
+//! just need to implement I2cHardware.
 
 use drv_i2c_types::traits::I2cHardware;
 
-// AST1060 (ASPEED) hardware implementation
-#[cfg(feature = "ast1060")]
-pub mod ast1060;
-
 /// Create the hardware-specific I2C driver instance
-/// 
-/// This function dispatches to the appropriate vendor implementation based
-/// on the enabled feature flag. Exactly one hardware vendor feature must be enabled.
-/// 
+///
+/// This function imports and constructs the appropriate driver based on
+/// enabled feature flags. Vendor drivers must:
+/// - Implement the I2cHardware trait
+/// - Provide a constructor (typically Driver::new() or from PAC)
+///
 /// # Returns
-/// 
-/// An instance of the hardware-specific driver that implements `I2cHardware` trait.
-/// 
-/// # Safety
-/// 
-/// Must only be called once per task. The driver takes ownership of hardware
-/// peripherals for its lifetime.
+///
+/// An opaque type implementing I2cHardware
 #[cfg(feature = "ast1060")]
 pub fn create_driver() -> impl I2cHardware {
-    ast1060::create_driver()
+    use drv_ast1060_i2c::{Ast1060I2cDriver, I2cPeripherals};
+
+    // Safety: Task owns I2C peripherals exclusively per app.toml
+    let peripherals = unsafe { I2cPeripherals::new() };
+    Ast1060I2cDriver::new(peripherals)
 }
 
 // Compile-time check: exactly one hardware vendor must be selected
 #[cfg(not(any(feature = "ast1060")))]
 compile_error!("No hardware vendor feature enabled. Enable one of: ast1060");
-
-// Future vendor integrations would add:
-// #[cfg(feature = "stm32")]
-// pub mod stm32;
-//
-// #[cfg(feature = "lpc55")]
-// pub mod lpc55;
-//
-// And update create_driver() with additional #[cfg] branches

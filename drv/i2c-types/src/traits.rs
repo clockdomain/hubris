@@ -1,4 +1,4 @@
-use crate::{Controller, ResponseCode, SlaveConfig, SlaveMessage};
+use crate::{Controller, ResponseCode, SlaveConfig};
 use serde::{Deserialize, Serialize};
 
 /// I2C bus speed configurations
@@ -245,4 +245,58 @@ pub trait I2cHardware {
         &mut self,
         controller: Controller,
     ) -> Result<(), Self::Error>;
+
+    /// Check if a specific controller has slave data available
+    ///
+    /// This is used by interrupt handlers to determine which controller
+    /// triggered an interrupt and has data ready for processing.
+    ///
+    /// # Arguments
+    ///
+    /// * `controller` - Which I2C controller to check
+    ///
+    /// # Returns
+    ///
+    /// `true` if the controller has received slave data, `false` otherwise
+    ///
+    /// # Default Implementation
+    ///
+    /// Hardware without slave interrupt support should return `false`.
+    fn check_slave_data(&self, _controller: Controller) -> bool {
+        false
+    }
+
+    /// Clear slave interrupts for a specific controller
+    ///
+    /// Called after processing slave data to acknowledge the interrupt
+    /// and allow new interrupts to be generated.
+    ///
+    /// # Arguments
+    ///
+    /// * `controller` - Which I2C controller to clear interrupts for
+    ///
+    /// # Default Implementation
+    ///
+    /// Hardware without slave interrupt support can use the default no-op.
+    fn clear_slave_interrupts(&self, _controller: Controller) {}
+
+    /// Read slave data from hardware
+    ///
+    /// Called when an interrupt indicates slave data is available.
+    /// Returns the source address and number of bytes read.
+    ///
+    /// # Arguments
+    ///
+    /// * `controller` - Which I2C controller to read from
+    /// * `buffer` - Buffer to store received data (up to 255 bytes)
+    ///
+    /// # Returns
+    ///
+    /// `Ok((source_address, data_length))` with the master's address and bytes read,
+    /// or an error if the read fails.
+    fn read_slave_data(
+        &mut self,
+        controller: Controller,
+        buffer: &mut [u8],
+    ) -> Result<(u8, usize), Self::Error>;
 }

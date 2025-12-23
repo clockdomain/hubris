@@ -19,16 +19,16 @@ mod recovery;
 mod timing;
 mod transfer;
 
-#[cfg(feature = "slave")]
 mod slave;
+mod server_driver;
 
 pub use constants::*;
 pub use controller::*;
 pub use error::*;
 pub use mux::*;
 
-#[cfg(feature = "slave")]
 pub use slave::*;
+pub use server_driver::*;
 
 use drv_i2c_api::Controller;
 

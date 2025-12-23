@@ -43,7 +43,7 @@ name = "drv-openprot-i2c-server"
 priority = 3
 max-sizes = {flash = 16384, ram = 4096}
 start = true
-features = ["ast1060", "slave"]  # Enable AST1060 hardware + slave mode
+features = ["ast1060"]  # AST1060 hardware support
 stacksize = 2048
 # Note: AST1060 has 14 I2C controllers, but MPU only supports 7 regions per task
 # For testing, include SCU (for clock/reset), i2c_global (for timing), and first I2C controller
@@ -60,6 +60,7 @@ max-sizes = {flash = 16384, ram = 4096}  # Increased for Aardvark test suite
 start = true
 stacksize = 2048  # Increased for slave mode tests
 task-slots = ["i2c", "uart_driver"]
+notifications = ["slave-rx", "timer"]
 
 [tasks.uart_driver]
 name = "drv-ast1060-uart"
