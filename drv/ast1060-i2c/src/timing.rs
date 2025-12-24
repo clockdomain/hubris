@@ -4,6 +4,7 @@ use crate::*;
 use ast1060_pac::i2c::RegisterBlock;
 
 /// Configure I2C timing based on speed
+#[inline(never)]
 pub fn configure_timing(
     regs: &RegisterBlock,
     config: &I2cConfig,

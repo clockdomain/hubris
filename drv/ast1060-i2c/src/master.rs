@@ -4,6 +4,7 @@ use crate::*;
 
 impl<'a> Ast1060I2c<'a> {
     /// Write bytes to an I2C device
+    #[inline(never)]
     pub fn write(&mut self, addr: u8, bytes: &[u8]) -> Result<(), I2cError> {
         if bytes.is_empty() {
             return Ok(());
@@ -16,6 +17,7 @@ impl<'a> Ast1060I2c<'a> {
     }
 
     /// Read bytes from an I2C device
+    #[inline(never)]
     pub fn read(
         &mut self,
         addr: u8,
@@ -32,6 +34,7 @@ impl<'a> Ast1060I2c<'a> {
     }
 
     /// Write then read (combined transaction)
+    #[inline(never)]
     pub fn write_read(
         &mut self,
         addr: u8,

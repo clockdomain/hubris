@@ -28,6 +28,7 @@ use drv_i2c_api::Controller;
 /// # Safety
 /// This function directly accesses SCU registers. It should only be called
 /// once per controller during initialization.
+#[inline(never)]
 pub unsafe fn configure_i2c_pins(controller: Controller) -> Result<(), I2cError> {
     let scu = &*ast1060_pac::Scu::ptr();
     

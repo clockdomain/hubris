@@ -63,7 +63,8 @@ impl<'a> Ast1060I2c<'a> {
     }
 
     /// Initialize hardware
-    fn init_hardware(&mut self, config: &I2cConfig) -> Result<(), I2cError> {
+    #[inline(never)]
+    pub fn init_hardware(&mut self, config: &I2cConfig) -> Result<(), I2cError> {
         // Configure pins first - required for external communication
         unsafe {
             crate::pinmux::configure_i2c_pins(self.controller.controller)?;
@@ -162,7 +163,8 @@ impl<'a> Ast1060I2c<'a> {
 }
 
 /// Initialize I2C global registers (one-time init)
-fn init_i2c_global() -> Result<(), I2cError> {
+#[inline(never)]
+pub fn init_i2c_global() -> Result<(), I2cError> {
     use core::sync::atomic::{AtomicBool, Ordering};
     static I2CGLOBAL_INIT: AtomicBool = AtomicBool::new(false);
 
