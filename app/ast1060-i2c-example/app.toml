@@ -46,12 +46,12 @@ start = true
 features = ["ast1060"]  # AST1060 hardware support
 stacksize = 2048
 # Note: AST1060 has 14 I2C controllers, but MPU only supports 7 regions per task
-# For testing, include SCU (for clock/reset/pinmux), i2c_global (for timing), and first I2C controller
-uses = ["scu", "i2c_global", "i2c0", "i2c_buffer0"]
+# For testing, include SCU (for clock/reset/pinmux), i2c_global (for timing), and I2C2 controller
+uses = ["scu", "i2c_global", "i2c2", "i2c_buffer2"]
 notifications = ["i2c-irq"]
 
 [tasks.i2c.interrupts]
-"i2c0.irq" = "i2c-irq"
+"i2c2.irq" = "i2c-irq"
 
 [tasks.i2c_client]
 name = "task-i2c-client"

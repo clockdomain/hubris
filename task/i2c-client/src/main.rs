@@ -37,7 +37,7 @@ enum Trace {
 ringbuf!(Trace, 16, Trace::None);
 
 /// I2C device configuration for testing
-const TEST_CONTROLLER: Controller = Controller::I2C0;
+const TEST_CONTROLLER: Controller = Controller::I2C2;
 const TEST_PORT: PortIndex = PortIndex(0);
 const TEST_DEVICE_ADDR: u8 = 0x50;
 const TEST_SLAVE_ADDR: u8 = 0x42;
