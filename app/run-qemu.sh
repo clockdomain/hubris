@@ -7,8 +7,8 @@ set -e
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Get the workspace root (one level up from app/)
-WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Workspace root is the script directory (transfer-work/)
+WORKSPACE_ROOT="$SCRIPT_DIR"
 
 # Check if app name provided
 if [ $# -eq 0 ]; then
