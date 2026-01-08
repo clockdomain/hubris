@@ -1,0 +1,601 @@
+= Openprot I2C Architecture
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+== Overview
+
+The openprot I2C subsystem provides a vendor-agnostic I2C driver framework for Hubris.
+It supports both master and slave modes through a layered architecture that separates
+application logic from hardware-specific implementation details.
+
+=== Design Goals
+
+1. **Hardware Abstraction**: Single API works across different I2C controllers
+2. **Vendor Agnostic**: Server logic is completely independent of hardware
+3. **Compile-Time Safety**: Hardware vendor selected via Cargo features
+4. **Both Modes**: Support master (initiator) and slave (target) operation
+5. **Memory Efficient**: Minimal runtime overhead and stack usage
+
+=== Three-Layer Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│  APPLICATION LAYER                                  │
+│  - Protocol implementation (MCTP, PMBus, etc.)      │
+│  - Uses I2cDevice API                               │
+└──────────────────┬──────────────────────────────────┘
+                   │ IPC via sys_send/sys_recv
+                   ▼
+┌─────────────────────────────────────────────────────┐
+│  SERVER FRAMEWORK (openprot-i2c-server)             │
+│  - IPC message dispatcher                           │
+│  - Interrupt handling                               │
+│  - Slave message buffering                          │
+│  - Hardware abstraction via I2cHardware trait       │
+└──────────────────┬──────────────────────────────────┘
+                   │ Trait method calls
+                   ▼
+┌─────────────────────────────────────────────────────┐
+│  HARDWARE DRIVER (e.g., ast1060-i2c)                │
+│  - Implements I2cHardware trait                     │
+│  - Register manipulation                            │
+│  - Platform-specific optimizations                  │
+└─────────────────────────────────────────────────────┘
+```
+
+== Client API Layer
+
+The client API (`drv/i2c-api/src/lib.rs`) provides the application-facing interface
+for I2C operations.
+
+=== I2cDevice
+
+The central abstraction is the `I2cDevice` struct, which identifies a specific
+I2C endpoint:
+
+```rust
+pub struct I2cDevice {
+    task: TaskId,           // I2C server task
+    controller: Controller, // I2C0-I2C7
+    port: PortIndex,        // Port/pin configuration
+    mux: Option<(Mux, Segment)>, // Optional multiplexer
+    address: u8,            // 7-bit device address
+}
+```
+
+=== Master Mode Operations
+
+```rust
+impl I2cDevice {
+    /// Write data then read response
+    pub fn write_read(&self, wbuf: &[u8], rbuf: &mut [u8]) -> Result<usize, ResponseCode>;
+
+    /// Write register address, read value
+    pub fn read_reg<T: AsBytes + FromBytes>(&self, reg: u8) -> Result<T, ResponseCode>;
+
+    /// Write data only
+    pub fn write(&self, buf: &[u8]) -> Result<(), ResponseCode>;
+
+    /// Read data only
+    pub fn read_into(&self, buf: &mut [u8]) -> Result<(), ResponseCode>;
+
+    /// SMBus block read (length byte first)
+    pub fn read_block(&self, reg: u8, buf: &mut [u8]) -> Result<usize, ResponseCode>;
+}
+```
+
+=== Slave Mode Operations
+
+```rust
+impl I2cDevice {
+    /// Configure this controller as a slave with the given address
+    pub fn configure_slave_address(&self, addr: u8) -> Result<(), ResponseCode>;
+
+    /// Start listening for incoming messages
+    pub fn enable_slave_receive(&self) -> Result<(), ResponseCode>;
+
+    /// Stop listening
+    pub fn disable_slave_receive(&self) -> Result<(), ResponseCode>;
+
+    /// Register for async notifications when messages arrive
+    pub fn enable_slave_notification(&self, mask: u32) -> Result<(), ResponseCode>;
+
+    /// Unregister from notifications
+    pub fn disable_slave_notification(&self) -> Result<(), ResponseCode>;
+
+    /// Retrieve a received message (call after notification)
+    pub fn get_slave_message(&self) -> Result<SlaveMessage, ResponseCode>;
+}
+```
+
+== Server Framework
+
+The server (`drv/openprot-i2c-server/src/main.rs`) handles IPC requests and manages
+hardware interaction through the `I2cHardware` trait.
+
+=== IPC Protocol
+
+All operations use a 4-byte marshalled payload:
+
+```
+Byte 0: Device address (7-bit) or 0 for slave operations
+Byte 1: Controller ID (0-7)
+Byte 2: Port index
+Byte 3: Mux encoding (bit 7: has_mux, bits 6-4: mux_id, bits 3-0: segment)
+```
+
+=== Operation Codes
+
+```rust
+pub enum Op {
+    WriteRead = 1,              // Master read/write
+    WriteReadBlock = 2,         // SMBus block operations
+    ConfigureSlaveAddress = 3,  // Set slave address
+    EnableSlaveReceive = 4,     // Start listening
+    DisableSlaveReceive = 5,    // Stop listening
+    EnableSlaveNotification = 6,  // Register for notifications
+    DisableSlaveNotification = 7, // Unregister
+    GetSlaveMessage = 8,        // Retrieve buffered message
+}
+```
+
+=== Main Event Loop
+
+```rust
+loop {
+    let msg = sys_recv_open(&mut buffer, notification_mask);
+
+    if msg.sender == TaskId::KERNEL {
+        // Hardware interrupt - handle slave data
+        if msg.operation & I2C_IRQ_MASK != 0 {
+            handle_slave_interrupt(&mut driver, ...);
+        }
+    } else {
+        // IPC request from client
+        match Op::from_u32(msg.operation) {
+            Some(Op::WriteRead) => handle_write_read(...),
+            Some(Op::GetSlaveMessage) => handle_get_slave_message(...),
+            // ... other operations
+        }
+    }
+}
+```
+
+=== Slave Message Buffering
+
+The server maintains a single message buffer per driver instance:
+
+```rust
+let mut pending_slave_msg: Option<(u8, SlaveMessage)> = None;
+let mut notification_client: Option<(TaskId, u32)> = None;
+```
+
+When a slave interrupt occurs:
+1. Check all controllers for received data
+2. Read data from hardware into `SlaveMessage`
+3. Store in `pending_slave_msg` (overwrites previous if unread)
+4. Post notification to registered client via `sys_post()`
+
+== Hardware Abstraction
+
+The `I2cHardware` trait (`drv/i2c-types/src/traits.rs`) defines the interface that
+platform-specific drivers must implement.
+
+=== Trait Definition
+
+```rust
+pub trait I2cHardware {
+    // === Master Mode ===
+
+    /// Perform a write-then-read transaction
+    fn write_read(
+        &mut self,
+        controller: Controller,
+        port: PortIndex,
+        addr: u8,
+        wlen: usize,
+        wbuf: impl Fn(usize) -> Option<u8>,
+        rlen: usize,
+        rbuf: impl FnMut(usize, u8) -> Option<()>,
+    ) -> Result<usize, ResponseCode>;
+
+    /// SMBus block read (length byte first)
+    fn write_read_block(...) -> Result<usize, ResponseCode>;
+
+    // === Slave Mode ===
+
+    /// Configure controller as slave with given address
+    fn configure_slave_mode(
+        &mut self,
+        controller: Controller,
+        config: &SlaveConfig,
+    ) -> Result<(), ResponseCode>;
+
+    /// Enable slave receive mode
+    fn enable_slave_receive(&mut self, controller: Controller) -> Result<(), ResponseCode>;
+
+    /// Disable slave receive mode
+    fn disable_slave_receive(&mut self, controller: Controller) -> Result<(), ResponseCode>;
+
+    /// Check if slave data is available (called from interrupt)
+    fn check_slave_data(&self, controller: Controller) -> bool;
+
+    /// Read received slave data
+    fn read_slave_data(
+        &mut self,
+        controller: Controller,
+    ) -> Result<SlaveMessage, ResponseCode>;
+
+    /// Clear slave interrupt flags
+    fn clear_slave_interrupts(&mut self, controller: Controller);
+
+    // === Controller Management ===
+
+    fn enable_controller(&mut self, controller: Controller) -> Result<(), ResponseCode>;
+    fn disable_controller(&mut self, controller: Controller) -> Result<(), ResponseCode>;
+    fn reset_bus(&mut self, controller: Controller) -> Result<(), ResponseCode>;
+}
+```
+
+=== Default Implementations
+
+Some methods have sensible defaults for hardware that doesn't support all features:
+
+```rust
+fn check_slave_data(&self, _controller: Controller) -> bool {
+    false  // No slave data available (slave mode not supported)
+}
+
+fn clear_slave_interrupts(&mut self, _controller: Controller) {
+    // No-op for polling-only hardware
+}
+```
+
+=== Hardware Diversity
+
+Different I2C controllers have varying capabilities. The `I2cHardware` trait
+abstracts these differences, but understanding them helps explain design decisions.
+
+|===
+| Feature | STM32H7 | LPC55 | AST1060
+
+| Hardware FIFO
+| 32 bytes
+| 16 bytes
+| 32-byte packet buffer
+
+| Automatic queuing
+| Yes
+| Yes
+| No
+
+| Single message buffer
+| Optional
+| Optional
+| **Required**
+
+| Max message size
+| 255 bytes
+| 255 bytes
+| 255 bytes
+
+| Number of controllers
+| 4
+| ~4
+| 14 (I2C0-I2C13)
+
+| Slave mode support
+| Yes
+| Yes
+| Yes
+|===
+
+**Key Implications:**
+
+1. **AST1060 requires single-buffer design** - No hardware FIFO means each packet
+   must be read before the next arrives. This drove the `Option<SlaveMessage>`
+   design in the server.
+
+2. **STM32/LPC55 could support queuing** - Their FIFOs allow buffering multiple
+   messages, but the current software uses the lowest-common-denominator approach
+   for portability.
+
+3. **Controller count varies** - AST1060's 14 controllers vs STM32's 4 affects
+   how many driver instances might be needed for complex systems.
+
+**Abstraction Goal:** Hide these differences from upper layers. Applications use
+the same `I2cDevice` API regardless of underlying hardware.
+
+== Platform Driver Example: AST1060
+
+The AST1060 driver (`drv/ast1060-i2c/`) demonstrates implementing `I2cHardware`.
+
+=== Structure
+
+```
+drv/ast1060-i2c/
+├── src/
+│   ├── lib.rs          # Entry point, mode selection
+│   ├── server_driver.rs # I2cHardware implementation
+│   ├── master.rs       # Master mode transfers
+│   ├── slave.rs        # Slave mode handling
+│   └── transfer.rs     # Low-level transfer modes
+```
+
+=== Transfer Modes
+
+The AST1060 supports two transfer modes:
+
+**Byte Mode**: Transfer one byte at a time
+- Simple state machine
+- Lower throughput
+- Good for small transfers
+
+**Buffer Mode**: Use hardware 32-byte buffer
+- Higher throughput
+- More efficient for larger payloads
+- Default mode
+
+=== Slave Mode Implementation
+
+```rust
+// slave.rs - Key functions
+
+pub fn configure_slave(
+    i2c: &I2cController,
+    config: &SlaveConfig,
+) -> Result<(), ResponseCode> {
+    // Disable master mode
+    i2c.func_ctrl().modify(|r| r.set_master_en(false));
+
+    // Set slave address
+    i2c.dev_addr().write(|r| r.set_addr(config.address));
+
+    // Enable slave mode and interrupts
+    i2c.func_ctrl().modify(|r| r.set_slave_en(true));
+    i2c.intr_ctrl().modify(|r| r.set_slave_match_en(true));
+
+    Ok(())
+}
+
+pub fn read_slave_data(i2c: &I2cController) -> Result<SlaveMessage, ResponseCode> {
+    // Check for errors
+    let status = i2c.intr_status().read();
+    if status.slave_error() {
+        return Err(ResponseCode::BusError);
+    }
+
+    // Get received length
+    let len = i2c.slave_rx_len().read().len() as usize;
+
+    // Copy from hardware buffer
+    let mut msg = SlaveMessage::new();
+    for i in 0..len {
+        msg.data[i] = i2c.slave_buffer(i).read();
+    }
+    msg.data_length = len as u8;
+
+    // Clear interrupt
+    i2c.intr_status().write(|r| r.set_rx_done(true));
+
+    Ok(msg)
+}
+```
+
+== Shared Types
+
+The `drv/i2c-types/` crate defines types shared between client, server, and drivers.
+
+=== SlaveMessage
+
+```rust
+/// Message received while operating in I2C slave mode
+pub struct SlaveMessage {
+    /// 7-bit address of the master that sent this message
+    pub source_address: u8,
+    /// Length of valid data (0-255)
+    pub data_length: u8,
+    /// Message data buffer (fixed 255 bytes)
+    pub data: [u8; 255],
+}
+
+impl SlaveMessage {
+    pub fn data(&self) -> &[u8] {
+        &self.data[..self.data_length as usize]
+    }
+}
+```
+
+=== SlaveConfig
+
+```rust
+/// Configuration for I2C slave mode
+pub struct SlaveConfig {
+    pub address: u8,       // 7-bit slave address
+    pub packet_mode: bool, // Hardware packet mode (performance)
+    pub buffer_mode: bool, // Use hardware buffer vs byte mode
+}
+```
+
+=== ResponseCode
+
+```rust
+pub enum ResponseCode {
+    // Master mode errors
+    NoDevice,           // No ACK received
+    BusLocked,          // Bus recovery performed
+    BusError,           // Protocol violation
+    ControllerBusy,     // Hardware unavailable
+
+    // Slave mode errors
+    SlaveNotSupported,  // Controller can't be slave
+    SlaveAddressInUse,  // Address already configured
+    BadSlaveAddress,    // Reserved or invalid address
+    SlaveNotEnabled,    // Receive not activated
+    NoSlaveMessage,     // No data in buffer
+    SlaveBufferFull,    // Messages dropped
+
+    // General errors
+    BadArg,             // Invalid parameters
+    BadController,      // Controller ID out of range
+    TooMuchData,        // Exceeds 255 byte limit
+}
+```
+
+== Configuration
+
+=== app.toml Setup
+
+**I2C Server Task:**
+```toml
+[tasks.i2c_driver]
+name = "drv-openprot-i2c-server"
+priority = 2
+features = ["ast1060"]  # Select hardware vendor
+uses = ["i2c0", "i2c1"] # Controllers to manage
+notifications = ["i2c-irq"]
+interrupts = { "i2c.irq" = "i2c-irq" }
+```
+
+**Client Task:**
+```toml
+[tasks.mctp_server]
+task-slots = ["i2c_driver"]  # Reference to I2C server
+notifications = ["i2c-slave-rx"]  # For async notifications
+```
+
+=== Cargo Features
+
+The server uses Cargo features for vendor selection:
+
+```toml
+# openprot-i2c-server/Cargo.toml
+[features]
+default = ["ast1060"]
+ast1060 = ["drv-ast1060-i2c", "ast1060-pac"]
+# Future: stm32h7, lpc55, etc.
+```
+
+Build-time vendor selection in `hardware.rs`:
+
+```rust
+#[cfg(feature = "ast1060")]
+pub fn create_driver() -> impl I2cHardware {
+    Ast1060I2cDriver::new()
+}
+
+#[cfg(not(any(feature = "ast1060")))]
+compile_error!("No I2C hardware vendor selected");
+```
+
+== Interrupt Flow
+
+=== Registration
+
+At server startup:
+```rust
+sys_irq_control(notifications::I2C_IRQ_MASK, true);
+```
+
+=== Interrupt Handling
+
+```
+1. Hardware raises IRQ
+   ↓
+2. Kernel delivers notification to I2C server
+   ↓
+3. sys_recv_open() returns with sender == TaskId::KERNEL
+   ↓
+4. Server checks which controller has data
+   ↓
+5. Driver reads from hardware buffer
+   ↓
+6. Server stores in pending_slave_msg
+   ↓
+7. Server calls sys_post(client_task, mask)
+   ↓
+8. Client wakes up, calls get_slave_message()
+```
+
+=== Client Notification
+
+```rust
+// Client registers for notifications
+i2c.enable_slave_notification(MY_NOTIFICATION_BIT)?;
+
+// Client event loop
+loop {
+    let msg = sys_recv_open(&mut buf, MY_NOTIFICATION_MASK);
+
+    if msg.sender == TaskId::KERNEL {
+        if msg.operation & MY_NOTIFICATION_MASK != 0 {
+            let slave_msg = i2c.get_slave_message()?;
+            process(slave_msg);
+        }
+    }
+}
+```
+
+== Design Decisions
+
+=== Single Message Buffer
+
+**Decision:** One `Option<SlaveMessage>` per driver instance
+
+**Rationale:**
+- Minimizes stack usage in interrupt context
+- Maintains determinism (one message per notification)
+- Matches simple hardware capabilities
+- Client must retrieve promptly or message is overwritten
+
+**Trade-off:** Protocols must handle potentially dropped messages via retransmission.
+
+=== Fixed 255-Byte Buffer
+
+**Decision:** `data: [u8; 255]` in SlaveMessage
+
+**Rationale:**
+- I2C transactions practically limited to 255 bytes
+- Matches SMBus block transfer limits
+- Avoids dynamic allocation
+- Deterministic memory usage
+
+=== 4-Byte Marshalled Payload
+
+**Decision:** Pack routing info into fixed 4 bytes
+
+**Rationale:**
+- Minimal IPC overhead
+- Deterministic size enables stack allocation
+- Bitpacking for mux/segment fits all routing combinations
+
+=== Polling vs Interrupt-Driven
+
+**Decision:** Support both models
+
+**Interrupt-driven (recommended):**
+- Register via `enable_slave_notification()`
+- Server posts notification on IRQ
+- Low latency, power efficient
+
+**Polling:**
+- Repeatedly call `get_slave_message()`
+- Higher latency and CPU overhead
+- Simpler for testing
+
+=== Separate Block Operations
+
+**Decision:** `WriteRead` and `WriteReadBlock` as distinct ops
+
+**Rationale:**
+- SMBus block mode is specialized (length byte first)
+- Most devices use normal I2C, not block mode
+- Cleaner API for common case
+
+== Related Documentation
+
+- link:i2c-slave-mode-architecture.adoc[I2C Slave Mode Architecture] - Detailed slave mode design
+- link:mctp-i2c-integration.adoc[MCTP-over-I2C Integration] - MCTP protocol integration
+- link:i2c-api.adoc[I2C API Specification] - Full API reference

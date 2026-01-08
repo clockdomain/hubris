@@ -16,6 +16,16 @@ Buffer management is critical for I2C operations in embedded systems, particular
 
 This document describes buffer management strategies for I2C drivers in Hubris, covering both master and slave modes.
 
+**Related Documentation:**
+
+- link:i2c-openprot-architecture.adoc[Openprot I2C Architecture] - Generic I2C driver framework
+- link:i2c-slave-mode-architecture.adoc[I2C Slave Mode Architecture] - Slave mode design and limitations
+- link:ast1060-i2c-implementation-guide.adoc[AST1060 Implementation Guide] - Platform-specific implementation
+
+**Current Implementation:** The openprot I2C server uses a **single message buffer** per driver instance.
+This document describes both the current approach and potential enhancements (ring buffer) for
+systems requiring higher throughput or burst tolerance.
+
 == Master Mode Buffer Management
 
 === Transaction Buffers
@@ -170,9 +180,12 @@ Master      Slave Driver          Client Task
 3. Multiple messages may arrive before client retrieves them
 4. Buffer overflow = lost messages
 
-=== Single Message Buffer (Simple)
+=== Single Message Buffer (Current Implementation)
 
 **Strategy:** Buffer only one message at a time.
+
+This is the current implementation in `drv/openprot-i2c-server/src/main.rs`. The server
+maintains `pending_slave_msg: Option<(u8, SlaveMessage)>` which holds at most one message.
 
 [source,rust]
 ----
@@ -218,9 +231,12 @@ impl SlaveState {
 - Client processes messages quickly
 - Message loss is acceptable (will be retried by protocol layer)
 
-=== Ring Buffer (Recommended)
+=== Ring Buffer (Future Enhancement)
 
 **Strategy:** Use a ring buffer to queue multiple messages.
+
+NOTE: This is a proposed enhancement, not the current implementation. The current
+openprot I2C server uses a single message buffer. See link:i2c-slave-mode-architecture.adoc#limitations[I2C Slave Mode Limitations] for enhancement roadmap.
 
 [source,rust]
 ----
@@ -271,11 +287,14 @@ impl SlaveState {
 - ⚠️ Uses more memory (N × message size)
 - ⚠️ Still bounded - can overflow
 
-**When to Use:**
-- Moderate to high message rate
-- Bursty traffic patterns
-- Message loss should be minimized
-- RAM budget allows for buffer
+**When to Consider This Enhancement:**
+- Moderate to high message rate causing frequent drops
+- Bursty traffic patterns overwhelming single buffer
+- Message loss metrics indicate buffer overflow issues
+- RAM budget allows for larger buffer
+
+**Current Workaround:** For MCTP-based deployments, the protocol layer handles
+retransmission when messages are lost, making the single buffer design acceptable.
 
 === Per-Controller Buffer Organization
 
@@ -728,12 +747,27 @@ Effective buffer management in I2C drivers requires balancing:
 - **Interrupt latency** vs. **processing complexity**
 - **Message loss** vs. **flow control complexity**
 
-Key takeaways:
+**Current Implementation:**
+
+The openprot I2C server uses a single message buffer per driver instance. This design:
+- Minimizes memory usage (~270 bytes per driver instance)
+- Works well for MCTP-based deployments where protocol handles retransmission
+- May lose messages under burst traffic (acceptable for current RoT use cases)
+
+**Key Takeaways:**
 
 1. **Master mode**: Use caller-provided buffers (zero-copy)
-2. **Slave mode**: Ring buffer with 4-8 messages typical
-3. **Hardware FIFOs**: Drain quickly in interrupt handler
-4. **IPC**: Accept some copying for simplicity and safety
-5. **Monitor**: Track drops and buffer usage
+2. **Slave mode (current)**: Single message buffer with protocol-level retry
+3. **Slave mode (future)**: Ring buffer for burst tolerance if needed
+4. **Hardware buffers**: Drain quickly in interrupt handler
+5. **IPC**: Accept some copying for simplicity and safety
+6. **Monitor**: Track drops via `SlaveStatus` if issues arise
 
-By following these guidelines, I2C drivers can handle typical traffic patterns while maintaining predictable memory usage and low latency.
+**Future Enhancements:**
+
+If message loss becomes problematic:
+- Replace single buffer with `heapless::Deque<SlaveMessage, N>`
+- Add `ResponseCode::SlaveBufferFull` for overflow signaling
+- Consider per-controller notification clients
+
+See link:i2c-slave-mode-architecture.adoc#limitations[I2C Slave Mode Limitations] for detailed enhancement roadmap.

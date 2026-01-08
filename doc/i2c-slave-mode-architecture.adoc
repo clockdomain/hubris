@@ -222,44 +222,63 @@ Hardware IRQ → Driver Task → sys_post(client_task, mask) → Client Task
 - Provide uniform interface via I2cHardware trait
 
 **Hardware Diversity:**
-Different I2C controllers have different capabilities:
-
-|===
-| Feature | STM32H7 | LPC55 | AST1060
-
-| Hardware FIFO
-| ✓ (32 bytes)
-| ✓ (16 bytes)
-| 32-byte packet buffer
-
-| Automatic queuing
-| ✓
-| ✓
-| ✗
-
-| Single message buffer
-| Optional
-| Optional
-| **Required**
-
-| Max message size
-| 255 bytes
-| 255 bytes
-| 255 bytes
-
-| Number of controllers
-| 4
-| ~4
-| 14 (I2C0-I2C13)
-|===
+Different I2C controllers have varying FIFO sizes, queuing capabilities, and
+controller counts. See link:i2c-openprot-architecture.adoc#_hardware_diversity[Hardware Diversity]
+in the openprot architecture document for a detailed comparison.
 
 **AST1060 Specifics:**
 The AST1060 uses a 32-byte hardware packet buffer (not a FIFO). Each received
-packet must be read before the next packet arrives. The driver stores the
-received data in a single `SlaveMessage` buffer, and clients must retrieve
-messages via `get_slave_message()` in response to notifications.
+packet must be read before the next packet arrives. This hardware constraint
+drove the single `SlaveMessage` buffer design - clients must retrieve messages
+promptly via `get_slave_message()` before the next interrupt overwrites the buffer.
 
-**Abstraction Goal:** Hide these differences from upper layers
+**Abstraction Goal:** Hide hardware differences from upper layers
+
+[[mpu-region-budget]]
+=== MPU Region Budget per Task
+
+ARMv7-M provides 8 MPU regions, with 1 region reserved for the kernel,
+leaving 7 usable regions per task.
+
+**Regions Required per I2C Controller:**
+
+|===
+| Resource | Regions | Purpose
+
+| scu
+| 1
+| Clock/reset/pinmux (shared)
+
+| i2c_global
+| 1
+| Timing configuration (shared)
+
+| i2cN
+| 1
+| Controller registers (0x80 bytes)
+
+| i2c_bufferN
+| 1
+| Buffer registers (0x20 bytes)
+|===
+
+**Practical Limits:**
+
+- 1 controller: 4 regions → Works, 3 regions spare
+- 2 controllers: 6 regions → Works, 1 region spare
+- 3+ controllers: 8+ regions → **Impossible**
+
+**Why Not a Single Large Region?**
+
+The I2C address space (0x7e7b0000-0x7e7b0dff) is ~3.5KB, but:
+
+- ARMv7-M MPU requires power-of-two aligned regions
+- Controllers (0x80 bytes) and buffers (0x20 bytes) don't align well
+- Would need 4KB region covering unused memory = security risk
+
+**Implication:** Systems requiring more than 2 I2C controllers in slave mode
+must deploy multiple `openprot-i2c-server` task instances, each handling
+at most 2 controllers.
 
 == Message Flow
 
@@ -333,26 +352,18 @@ messages via `get_slave_message()` in response to notifications.
 └──────────────────────────────────────────┘
 ```
 
-**Timeline:**
-```
-T=0µs      Master starts write to 0x1D
-T=~250µs   Transaction complete (32 bytes @ 400kHz)
-T=250µs    Hardware interrupt fires
-T=250µs    Kernel dispatches to driver
-T=251µs    Driver reads hardware buffer
-T=252µs    Driver buffers message
-T=253µs    Driver calls sys_post()
-T=253µs    Kernel unblocks client
-T=254µs    Client calls get_slave_message()
-T=256µs    Client receives message
-T=256µs+   Client processes message
-```
+**Sequence:**
 
-**Key Latencies:**
-- Hardware to software buffer: ~3µs (critical path)
-- Software buffer to client: ~3µs (IPC overhead)
-- Total notification latency: ~6µs
-- Processing latency: Depends on protocol complexity
+1. Master starts write to slave address
+2. Transaction completes (e.g., 32 bytes @ 400kHz takes ~640µs)
+3. Hardware interrupt fires
+4. Kernel dispatches to driver task
+5. Driver reads hardware buffer
+6. Driver stores message in `pending_slave_msg`
+7. Driver calls `sys_post()` to notify client
+8. Kernel unblocks client task
+9. Client calls `get_slave_message()`
+10. Client receives and processes message
 
 == Buffering Strategy
 
@@ -426,27 +437,34 @@ if they call `get_slave_message()` after the message has been overwritten.
 
 === Single Subscriber Pattern
 
-**Design Decision:** One task globally can subscribe to slave notifications
+**Design Decision:** One task per driver instance can subscribe to slave notifications
 
-The current implementation uses a single global `notification_client: Option<(TaskId, u32)>`.
-This means only one task in the entire system can receive slave mode notifications at a time,
-regardless of which I2C controller the message arrives on.
+Each `openprot-i2c-server` instance has its own `notification_client: Option<(TaskId, u32)>`.
+This means only one task can receive slave mode notifications from a given driver instance.
 
 **Rationale:**
-1. **Simplicity**: Single global `Option<(TaskId, u32)>` minimizes state
-2. **Clear Ownership**: One task owns all slave mode traffic
-3. **Typical Usage**: Most systems have a single protocol handler (e.g., MCTP server)
-4. **Message Routing**: The single subscriber can route messages based on controller ID
+1. **Simplicity**: Single `Option<(TaskId, u32)>` per driver minimizes state
+2. **Clear Ownership**: One task owns slave traffic for that driver instance
+3. **Typical Usage**: Most systems have a single protocol handler (e.g., MCTP server) per bus
 
-**Current Architecture:**
+**Architecture (Per Driver Instance):**
 ```
-┌──────────────────────────────────────────────┐
-│ All I2C controllers → Single Subscriber Task │
-│   I2C0 ─┐                                    │
-│   I2C1 ─┼──→ notification_client (one task)  │
-│   I2C2 ─┘                                    │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│ Driver Instance A (I2C0, I2C1)                   │
+│   I2C0 ─┬──→ notification_client (one task)      │
+│   I2C1 ─┘                                        │
+└──────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────┐
+│ Driver Instance B (I2C2, I2C3)                   │
+│   I2C2 ─┬──→ notification_client (one task)      │
+│   I2C3 ─┘                                        │
+└──────────────────────────────────────────────────┘
 ```
+
+NOTE: Due to MPU region constraints, each driver task can manage at most 2 I2C
+controllers. Systems requiring more controllers must deploy multiple driver
+instances. See <<mpu-region-budget>> for details.
 
 **Limitation: No Controller Identification**
 
@@ -467,80 +485,19 @@ include the controller ID, or using separate I2C driver instances per protocol.
 
 === MCTP-over-I2C
 
-**Management Component Transport Protocol**
+MCTP (Management Component Transport Protocol) is the primary use case for I2C slave mode
+in Hubris RoT deployments. MCTP provides a transport layer for security and management
+protocols including SPDM, PLDM, and vendor-defined messages.
 
-This example is based on the actual `task/mctp-server/src/main.rs` implementation:
+For detailed MCTP-I2C integration documentation, see:
+link:mctp-i2c-integration.adoc[MCTP-over-I2C Integration]
 
-```rust
-use drv_i2c_api::*;
-use userlib::*;
+**Key Points:**
 
-// MCTP endpoint configuration
-const I2C_OWN_ADDR: u8 = 0x12; // Our I2C slave address
-
-// Create device handle (address field unused for slave mode)
-let i2c_recv = I2cDevice::new(
-    I2C.get_task_id(),
-    Controller::I2C1,
-    PortIndex(0),
-    None,
-    0x00, // Address unused for slave mode; configured via configure_slave_address()
-);
-
-// Configure slave mode
-i2c_recv.configure_slave_address(I2C_OWN_ADDR).unwrap_lite();
-i2c_recv.enable_slave_receive().unwrap_lite();
-i2c_recv.enable_slave_notification(notifications::I2C_RX_BIT).unwrap_lite();
-
-let mut msg_buf = [0u8; 256];
-let notification_mask = notifications::I2C_RX_MASK | notifications::TIMER_MASK;
-
-loop {
-    let msg = sys_recv_open(&mut msg_buf, notification_mask);
-
-    if msg.sender == TaskId::KERNEL {
-        // Handle I2C slave receive notification
-        if (msg.operation & notifications::I2C_RX_MASK) != 0 {
-            match i2c_recv.get_slave_message() {
-                Ok(slave_msg) => {
-                    let data = slave_msg.data();
-                    log::trace!("I2C MCTP RX: {:02x?}", data);
-
-                    // Decode MCTP-over-I2C packet and process
-                    match i2c_reader.recv(data) {
-                        Ok(pkt) => {
-                            server.stack.inbound(pkt)?;
-                        }
-                        Err(e) => {
-                            log::warn!("I2C MCTP decode error: {:?}", e);
-                        }
-                    }
-                }
-                Err(ResponseCode::NoSlaveMessage) => {
-                    // Spurious notification, ignore
-                }
-                Err(e) => {
-                    log::warn!("I2C slave message error: {:?}", e);
-                }
-            }
-        }
-
-        // Handle timer for protocol timeouts
-        if (msg.operation & notifications::TIMER_MASK) != 0 {
-            server.update(sys_get_timer().now);
-        }
-    } else {
-        // Handle IPC messages from other tasks
-        handle_mctp_msg(&msg_buf, msg, &mut server);
-    }
-}
-```
-
-**Key Requirements:**
-- Multi-packet message reassembly (handled by `mctp_stack`)
-- Source address routing for responses
-- Timeout handling via timer notifications
-- Message fragmentation support
+- MCTP uses EID (Endpoint ID) for routing, not I2C addresses
+- Single subscriber pattern works well since MCTP server handles demultiplexing
+- Message type field routes to SPDM (0x05), PLDM (0x01), or vendor messages
+- The `SlaveMessage` controller ID limitation does not affect MCTP deployments
 
 === PMBus/SMBus
 
@@ -865,26 +822,12 @@ by most I2C controllers including the AST1060.
 
 === MCTP-Based Protocol Stacks (SPDM, PLDM)
 
-For protocols that run **over MCTP** (SPDM, PLDM, vendor-defined), the current design scales well:
+For protocols that run **over MCTP** (SPDM, PLDM, vendor-defined), the current design
+scales well. The MCTP server multiplexes different protocols via the MCTP message type
+field, so the single subscriber pattern at the I2C layer is not a limitation.
 
-```
-┌─────────────────────────────────────────────────┐
-│  SPDM Task        PLDM Task        Vendor Task  │  ← Multiple listeners
-│      │                │                │        │
-│      └────────────────┼────────────────┘        │
-│                       ▼                         │
-│              MCTP Server                        │  ← Multiplexes by msg_type
-│           (listener per msg_type)               │
-│                       │                         │
-│                       ▼                         │
-│            I2C Slave Driver                     │  ← Single subscriber OK
-│         (single notification_client)            │
-└─────────────────────────────────────────────────┘
-```
-
-The MCTP server's `listener(msg_type)` API allows multiple tasks to register for different
-MCTP message types (SPDM=0x05, PLDM=0x01, etc.). The I2C slave layer only needs to deliver
-raw bytes to the single MCTP server, which handles protocol demultiplexing.
+See link:mctp-i2c-integration.adoc[MCTP-over-I2C Integration] for detailed architecture
+and comparisons with other implementations (Caliptra MCU SW).
 
 === Non-MCTP Multi-Protocol Scenarios
 
@@ -895,141 +838,137 @@ For scenarios requiring **multiple independent I2C protocols** (not over MCTP), 
 | Limitation | Current State | RoT Requirement
 
 | Notification subscribers
-| 1 global (all controllers → 1 task)
+| 1 per driver instance (max 2 controllers per instance due to MPU)
 | Per-controller or per-protocol subscribers
 
 | Message buffer
-| 1 message (overwrites on overflow)
+| 1 message per driver instance (overwrites on overflow)
 | Queue to handle burst traffic without loss
-
-| Controller identification
-| `SlaveMessage` lacks controller ID
-| Client needs to know which controller received message
 
 | Overflow handling
 | Silent overwrite
 | Error signaling, no silent message loss
 
 | Concurrent I2C protocols
-| Single protocol only
+| Single protocol per driver instance
 | MCTP + raw PMBus + debug simultaneously (separate I2C buses)
 |===
 
 **Workarounds for current limitations:**
 
-1. **Single protocol per deployment** - Current design works well
-2. **Dispatcher task** - One task receives all messages, routes based on content (not controller)
-3. **Separate I2C driver instances** - Deploy multiple `openprot-i2c-server` tasks for different controllers (increases memory usage)
+1. **Single protocol per driver instance** - Current design works well
+2. **Dispatcher task** - One task receives all messages from a driver instance, routes based on content
+3. **Separate I2C driver instances** - Deploy multiple `openprot-i2c-server` tasks for different controllers (required for 3+ controllers anyway due to MPU constraints)
 
 **Enhancements needed for full RoT support:**
 
-1. Add `controller: Controller` field to `SlaveMessage`
-2. Change `notification_client` from `Option<(TaskId, u32)>` to per-controller map
-3. Replace single message buffer with a queue (`heapless::Deque`)
-4. Add `ResponseCode::SlaveBufferFull` for overflow signaling
+1. Replace single message buffer with a queue (`heapless::Deque`)
+2. Add `ResponseCode::SlaveBufferFull` for overflow signaling
 
 === Comparison with Caliptra MCU SW
 
-The Caliptra MCU SW project (Tock OS-based) implements a similar MCTP-over-I3C architecture.
-This comparison highlights shared limitations and architectural differences:
+The Caliptra MCU SW project implements a similar MCTP-based architecture on Tock OS.
+Both projects share fundamental limitations (single message buffer, silent overflow)
+and have concluded that protocol demultiplexing belongs at the MCTP layer.
+
+For detailed comparison, see link:mctp-i2c-integration.adoc#comparison-with-other-implementations[MCTP-I2C: Comparison with Other Implementations].
+
+=== Comparison with OpenTitan
+
+OpenTitan's I2C IP represents a more mature design that addresses many limitations
+shared by Hubris and Caliptra. This comparison highlights what a robust I2C target
+implementation looks like.
+
+**OpenTitan I2C Target Architecture:**
 
 ```
-Caliptra MCU SW Architecture:
-
-┌─────────────────────────────────────────┐
-│  Userspace Applications                 │
-│  (SPDM, PLDM, Vendor-defined)           │
-└────────────────┬────────────────────────┘
-                 │ Syscalls
-┌────────────────▼────────────────────────┐
-│  MCTP Drivers (4 instances)             │
-│  ├── SPDM (0xA0000)                     │
-│  ├── Secure SPDM (0xA0001)              │
-│  ├── PLDM (0xA0002)                     │
-│  └── Caliptra VDM (0xA0003)             │
-└────────────────┬────────────────────────┘
-                 │
-┌────────────────▼────────────────────────┐
-│  MuxMCTPDriver (message multiplexing)   │
-└────────────────┬────────────────────────┘
-                 │
-┌────────────────▼────────────────────────┐
-│  MCTPI3CBinding (transport binding)     │
-└────────────────┬────────────────────────┘
-                 │
-┌────────────────▼────────────────────────┐
-│  I3CCore (single I3C target device)     │
-└─────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│  Software Driver                                │
+│  - Threshold-based interrupt handling           │
+│  - Software-controlled ACK/NACK                 │
+└────────────────┬────────────────────────────────┘
+                 │ Register Access
+┌────────────────▼────────────────────────────────┐
+│  I2C IP Core                                    │
+│  ├── Controller Module (host mode)              │
+│  ├── Target Module (slave mode)                 │
+│  │   ├── ACQ FIFO (received data)               │
+│  │   └── TX FIFO (transmit data)                │
+│  └── Bus Monitor (arbitration detection)        │
+└────────────────┬────────────────────────────────┘
+                 │ I2C Bus
 ```
 
 |===
-| Limitation | Hubris I2C Slave | Caliptra MCU SW | Notes
+| Feature | Hubris | Caliptra MCU SW | OpenTitan
 
 | Message Buffer
-| Single `Option<SlaveMessage>` with overwrite
-| Single `OptionalCell<BufferedMessage>` with overwrite
-| **SAME** - both lose messages on overflow
-
-| Subscriber Model
-| One global `notification_client`
-| One app per message type (first match wins)
-| **SIMILAR** - neither supports broadcast
+| Single `Option<SlaveMessage>`
+| Single `OptionalCell`
+| Dual FIFOs (ACQ + TX)
 
 | Overflow Handling
 | Silent overwrite
-| Silent overwrite with `println()` warning
-| **SAME** - no error signaling to sender
+| Silent overwrite
+| Clock stretching prevents overflow
 
-| Concurrent MCTP Protocols
-| Via MCTP server's `listener(msg_type)` API
-| Via MuxMCTPDriver routing to separate drivers
-| **SAME** - both multiplex at MCTP layer
+| Data Loss
+| Possible on burst traffic
+| Possible on burst traffic
+| Prevented by hardware flow control
 
-| Transport Abstraction
-| I2C can be used for non-MCTP
-| I3C exclusively bound to MCTP
-| **HUBRIS BETTER** - more flexible
+| Interrupt Model
+| Single notification per message
+| Single notification
+| Granular (threshold, empty, complete, error)
+
+| Flow Control
+| None (software must keep up)
+| None
+| Hardware clock stretching
+
+| ACK/NACK Control
+| Automatic ACK
+| Automatic ACK
+| Software-controlled per byte
 |===
 
-**Shared Critical Limitations:**
+**Key OpenTitan Advantages:**
 
-Both implementations share these fundamental constraints:
+1. **Dual FIFO Architecture** - Separate ACQ (acquisition) and TX (transmit) FIFOs
+   allow buffering multiple messages. The ACQ FIFO is sized to absorb a full
+   255-byte SMBus Block-Write without software intervention.
 
-1. **Single Message Buffer** - A single slot that overwrites on overflow. Neither
-   implementation uses a queue, so burst traffic causes silent message loss.
+2. **Hardware Clock Stretching** - When the ACQ FIFO approaches full, hardware
+   automatically stretches SCL before the ACK bit, giving software time to drain
+   the buffer. This prevents data loss entirely under normal operation.
 
-2. **Silent Overflow** - When messages arrive faster than they can be processed,
-   they are silently dropped or overwritten. Neither signals errors to the sender.
+3. **Configurable Thresholds** - Interrupts fire when FIFO depth exceeds a
+   configurable threshold, not just when data arrives. This enables proactive
+   buffer management before overflow occurs.
 
-3. **Single Subscriber per Type** - Only one consumer can receive messages of a
-   given type at a time. Pub/sub patterns are not supported.
+4. **Software-Controlled ACK/NACK** - The `TARGET_ACK_CTRL` register allows
+   software to examine the pending byte via `ACQ_FIFO_NEXT_DATA` before deciding
+   whether to ACK or NACK. This enables protocol-level flow control.
 
-**Where Hubris Improves:**
+5. **Timeout Protection** - If clock stretching persists beyond a configured
+   timeout, hardware automatically NACKs the transaction rather than hanging
+   the bus indefinitely.
 
-1. **Transport Flexibility** - Hubris I2C slave mode is a generic transport layer.
-   Applications can use it for MCTP, raw PMBus, or custom protocols. Caliptra's
-   I3C is exclusively bound to MCTP with no abstraction layer for other uses.
+**Implications for Hubris:**
 
-2. **Task Isolation** - Hubris task model provides stronger isolation between
-   the driver and applications than Tock's capsule model.
+OpenTitan's approach demonstrates that preventing data loss is achievable with
+proper hardware support. The "Enhancements needed for full RoT support" section
+above could be extended to include:
 
-**Common Design Pattern:**
+- Hardware clock stretching support (requires hardware capability)
+- Threshold-based notifications (software can approximate with smaller buffers)
+- Software-controlled ACK/NACK (requires I2cHardware trait extension)
 
-Both follow a similar layered approach:
-```
-Application (SPDM/PLDM) → Transport (MCTP) → Physical (I2C/I3C)
-```
-
-This validates the Hubris architecture choice of multiplexing at the MCTP layer
-rather than the I2C layer. Both projects concluded that protocol demultiplexing
-belongs at the MCTP layer via message type, not at the physical layer.
-
-**Caliptra Transport Details:**
-
-- Physical Layer: I3C Target Device (not controller)
-- MTU: 68 bytes (69 byte buffer - 1 PEC byte)
-- Integrity: SMBus CRC8 PEC (Packet Error Checking)
-- Flow Control: IBI (In-Band Interrupt) or polling modes
+However, these features require hardware support that may not be available on
+all target platforms (e.g., AST1060). The current Hubris design prioritizes
+portability and simplicity, relying on higher-layer protocols (MCTP) to handle
+retransmission when messages are lost.
 
 == Conclusion
 
@@ -1065,11 +1004,17 @@ I2C slave mode support in Hubris provides:
 - `drv/openprot-i2c-server/src/main.rs` - IPC server handling slave operations
 - `drv/ast1060-i2c/src/slave.rs` - AST1060-specific slave mode implementation
 
+**Related Documentation:**
+
+- link:i2c-openprot-architecture.adoc[Openprot I2C Architecture] - Generic I2C driver framework
+- link:mctp-i2c-integration.adoc[MCTP-over-I2C Integration] - MCTP protocol integration details
+- link:i2c-buffer-management.adoc[Buffer Management] - Buffering strategies
+- link:i2c-api.adoc[API Specification] - Detailed API reference
+
 **Next Steps:**
-1. Review link:i2c-buffer-management.adoc[Buffer Management] for buffering strategies
-2. Review link:i2c-api.adoc[API Specification] for detailed API reference
-3. For new platforms: implement `I2cHardware` trait in platform-specific driver
-4. Write integration tests using external I2C master (e.g., Aardvark)
-5. Deploy and monitor in production
+
+1. For new platforms: implement `I2cHardware` trait in platform-specific driver
+2. Write integration tests using external I2C master (e.g., Aardvark)
+3. Deploy and monitor in production
 
 This architecture supports current needs while remaining flexible for future protocol requirements and hardware platforms.

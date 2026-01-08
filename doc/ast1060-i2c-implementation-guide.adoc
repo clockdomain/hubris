@@ -9,13 +9,19 @@
 This guide provides concrete recommendations for implementing the AST1060 I2C driver to work with the Hubris I2C API framework.
 
 **Current Status:**
-- ✅ Low-level hardware driver implemented ([drv/ast1060-i2c](../drv/ast1060-i2c))
-- ✅ Generic I2C server implemented ([drv/openprot-i2c-server](../drv/openprot-i2c-server))
-- ❌ I2cHardware trait implementation (missing)
-- ❌ Software message buffering for slave mode (missing)
-- ❌ Integration with server (missing)
+- ✅ Low-level hardware driver implemented (`drv/ast1060-i2c/`)
+- ✅ Generic I2C server implemented (`drv/openprot-i2c-server/`)
+- ✅ I2cHardware trait implementation (`drv/ast1060-i2c/src/server_driver.rs`)
+- ✅ Slave mode implementation (`drv/ast1060-i2c/src/slave.rs`)
+- ✅ Integration with server (via `I2cHardware` trait)
 
-**Goal:** Bridge the gap between low-level hardware operations and the high-level I2C API.
+**Related Documentation:**
+
+- link:i2c-openprot-architecture.adoc[Openprot I2C Architecture] - Generic I2C driver framework
+- link:i2c-slave-mode-architecture.adoc[I2C Slave Mode Architecture] - Slave mode design and limitations
+- link:mctp-i2c-integration.adoc[MCTP-over-I2C Integration] - MCTP protocol integration
+
+**Purpose:** This guide explains the architectural decisions and implementation patterns used in the AST1060 I2C driver.
 
 == Why an Adapter Layer?
 
@@ -1111,24 +1117,37 @@ adapter.configure_slave_mode(controller, &config)
     })?;
 ```
 
-== Next Steps
+== Implementation Status
 
-1. **Create hardware adapter module** (`drv/ast1060-i2c/src/hardware_adapter.rs`)
-2. **Implement I2cHardware trait** following Phase 1-3 structure
-3. **Add interrupt integration** following Phase 4
-4. **Update server** to use real hardware (Phase 5)
-5. **Write unit tests** for adapter layer
-6. **Create integration test app** to verify full stack
-7. **Measure performance** (latency, throughput)
-8. **Document any deviations** from this guide
+The AST1060 I2C driver has been implemented following the patterns described in this guide:
+
+**Implemented Files:**
+
+- `drv/ast1060-i2c/src/server_driver.rs` - I2cHardware trait implementation
+- `drv/ast1060-i2c/src/slave.rs` - Slave mode hardware operations
+- `drv/ast1060-i2c/src/master.rs` - Master mode hardware operations
+- `drv/ast1060-i2c/src/transfer.rs` - Low-level transfer modes
+
+**Example Applications:**
+
+- `app/ast1060-i2c-example/` - Basic I2C slave mode test
+- `app/ast1060-mctp-i2c-echo/` - MCTP-over-I2C integration test
+
+**Future Enhancements:**
+
+1. Add software message queue for burst traffic tolerance
+2. Measure and optimize interrupt handler latency
+3. Add `ResponseCode::SlaveBufferFull` for overflow signaling
+4. Consider hardware clock stretching support if available
 
 == Conclusion
 
-This implementation bridges the gap between the low-level AST1060 hardware driver and the high-level I2C API framework. The key challenges are:
+The AST1060 I2C driver bridges the low-level hardware with the high-level I2C API framework. Key architectural points:
 
-- **Software buffering**: Mandatory due to lack of hardware FIFO
-- **Fast interrupt handling**: Copy data quickly before next packet arrives
-- **Error conversion**: Map hardware errors to API error codes
-- **State management**: Track configuration and buffers per controller
+- **Adapter Pattern**: Routes controller selection to per-controller driver instances
+- **Single Message Buffer**: Driven by AST1060 hardware constraints (no FIFO)
+- **Fast Interrupt Handling**: Copy data quickly before next packet arrives
+- **Error Conversion**: Maps hardware errors to API error codes
 
-Following this guide ensures a robust, performant I2C driver implementation that integrates cleanly with the Hubris I2C API ecosystem.
+The current implementation uses a single message buffer per driver instance. For systems
+requiring higher throughput or burst tolerance, see link:i2c-slave-mode-architecture.adoc#limitations[I2C Slave Mode Limitations] for enhancement options.

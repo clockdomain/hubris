@@ -1,0 +1,548 @@
+= MCTP-over-I2C Integration
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+== Overview
+
+This document describes how the Management Component Transport Protocol (MCTP) integrates
+with the Hubris I2C slave mode infrastructure. MCTP provides a standardized transport
+layer for platform management protocols like SPDM, PLDM, and vendor-defined messages.
+
+=== Related Documentation
+
+- link:i2c-slave-mode-architecture.adoc[I2C Slave Mode Architecture] - Low-level I2C slave implementation
+- link:i2c-openprot-architecture.adoc[Openprot I2C Architecture] - Generic I2C driver framework
+
+== MCTP Protocol Stack
+
+MCTP defines a layered architecture where the physical transport (I2C) is abstracted
+from the message layer:
+
+```
+┌─────────────────────────────────────────────────┐
+│  Applications                                   │
+│  (SPDM, PLDM, Vendor-Defined Messages)          │
+└────────────────┬────────────────────────────────┘
+                 │ Message Type Routing
+┌────────────────▼────────────────────────────────┐
+│  MCTP Server                                    │
+│  - Packet assembly/disassembly                  │
+│  - EID-based routing                            │
+│  - Message type multiplexing                    │
+└────────────────┬────────────────────────────────┘
+                 │ SlaveMessage
+┌────────────────▼────────────────────────────────┐
+│  I2C Slave Driver                               │
+│  - Raw byte reception                           │
+│  - Notification delivery                        │
+└─────────────────────────────────────────────────┘
+```
+
+== I2C Transport Configuration
+
+=== Device Handle Setup
+
+The MCTP server creates an `I2cDevice` handle configured for slave mode. Based on the
+actual implementation in `task/mctp-server/src/main.rs`:
+
+```rust
+use drv_i2c_api::*;
+use userlib::*;
+
+// MCTP endpoint configuration
+const I2C_OWN_ADDR: u8 = 0x12; // Our I2C slave address
+
+// Create device handle (address field unused for slave mode)
+let i2c_recv = I2cDevice::new(
+    I2C.get_task_id(),
+    Controller::I2C1,
+    PortIndex(0),
+    None,
+    0x00, // Address unused for slave mode; configured via configure_slave_address()
+);
+
+// Configure slave mode
+i2c_recv.configure_slave_address(I2C_OWN_ADDR).unwrap_lite();
+i2c_recv.enable_slave_receive().unwrap_lite();
+i2c_recv.enable_slave_notification(notifications::I2C_RX_BIT).unwrap_lite();
+```
+
+NOTE: The `address` field in `I2cDevice::new()` is for master mode (target address).
+For slave mode, the listening address is set via `configure_slave_address()`.
+
+=== Event Loop Integration
+
+The MCTP server uses an event-driven architecture, waiting for I2C notifications
+alongside other events:
+
+```rust
+let mut msg_buf = [0u8; 256];
+let notification_mask = notifications::I2C_RX_MASK | notifications::TIMER_MASK;
+
+loop {
+    let msg = sys_recv_open(&mut msg_buf, notification_mask);
+
+    if msg.sender == TaskId::KERNEL {
+        // Handle I2C slave receive notification
+        if (msg.operation & notifications::I2C_RX_MASK) != 0 {
+            match i2c_recv.get_slave_message() {
+                Ok(slave_msg) => {
+                    let data = slave_msg.data();
+                    log::trace!("I2C MCTP RX: {:02x?}", data);
+
+                    // Decode MCTP-over-I2C packet and process
+                    match i2c_reader.recv(data) {
+                        Ok(pkt) => {
+                            server.stack.inbound(pkt)?;
+                        }
+                        Err(e) => {
+                            log::warn!("I2C MCTP decode error: {:?}", e);
+                        }
+                    }
+                }
+                Err(ResponseCode::NoSlaveMessage) => {
+                    // Spurious notification, ignore
+                }
+                Err(e) => {
+                    log::warn!("I2C slave message error: {:?}", e);
+                }
+            }
+        }
+
+        // Handle timer for protocol timeouts
+        if (msg.operation & notifications::TIMER_MASK) != 0 {
+            server.update(sys_get_timer().now);
+        }
+    } else {
+        // Handle IPC messages from other tasks
+        handle_mctp_msg(&msg_buf, msg, &mut server);
+    }
+}
+```
+
+=== Key Implementation Requirements
+
+- **Multi-packet message reassembly**: Handled by `mctp_stack` crate
+- **Source address routing**: MCTP uses EID (Endpoint ID) for responses
+- **Timeout handling**: Protocol-level timeouts via timer notifications
+- **Error recovery**: Graceful handling of decode errors and missing messages
+
+== EID-Based Routing
+
+MCTP uses Endpoint IDs (EIDs) for message routing, not I2C addresses. This provides
+protocol-layer source identification:
+
+```
+┌────────────────────────────────────────────────────────┐
+│  MCTP Packet Structure (I2C binding)                   │
+├────────────────────────────────────────────────────────┤
+│  Byte 0: Destination I2C Address (for master)          │
+│  Byte 1: Command Code (0x0F for MCTP)                  │
+│  Byte 2: Byte Count                                    │
+│  Byte 3: Source I2C Address (7-bit << 1)               │
+│  Bytes 4-7: MCTP Transport Header                      │
+│    - Header Version                                    │
+│    - Destination EID  ← Routing identifier             │
+│    - Source EID       ← Response routing               │
+│    - Flags (SOM/EOM/Pkt Seq/Tag)                       │
+│  Bytes 8+: MCTP Payload                                │
+└────────────────────────────────────────────────────────┘
+```
+
+**Implication**: The `SlaveMessage` struct does not include a controller ID field,
+but this is not a limitation for MCTP deployments. Source identification occurs at
+the MCTP layer via the Source EID field.
+
+== Protocol Multiplexing
+
+=== MCTP Message Types
+
+The MCTP server multiplexes different protocols based on the MCTP message type:
+
+|===
+| Message Type | Protocol | Description
+
+| 0x00
+| MCTP Control
+| Endpoint discovery, EID assignment
+
+| 0x01
+| PLDM
+| Platform Level Data Model
+
+| 0x05
+| SPDM
+| Security Protocol and Data Model
+
+| 0x7E-0x7F
+| Vendor-Defined
+| Custom protocols
+|===
+
+=== Architecture with Multiple Protocols
+
+```
+┌─────────────────────────────────────────────────┐
+│  SPDM Task        PLDM Task        Vendor Task  │  ← Multiple listeners
+│      │                │                │        │
+│      └────────────────┼────────────────┘        │
+│                       ▼                         │
+│              MCTP Server                        │  ← Multiplexes by msg_type
+│           (listener per msg_type)               │
+│                       │                         │
+│                       ▼                         │
+│            I2C Slave Driver                     │  ← Single subscriber OK
+│         (single notification_client)            │
+└─────────────────────────────────────────────────┘
+```
+
+The MCTP server's `listener(msg_type)` API allows multiple tasks to register for
+different MCTP message types. The I2C slave layer only needs to deliver raw bytes
+to the single MCTP server, which handles protocol demultiplexing.
+
+=== Why Single Subscriber Works
+
+The I2C slave driver's "single subscriber per driver instance" limitation does not
+affect MCTP-based deployments because:
+
+1. **Multiplexing happens at MCTP layer** - One MCTP server receives all I2C packets
+2. **EID-based routing** - Responses routed via EID, not I2C controller
+3. **Message type dispatch** - MCTP server routes to SPDM/PLDM/VDM tasks internally
+
+== Comparison with Other Implementations
+
+=== Caliptra MCU SW
+
+The Caliptra MCU SW project (Tock OS-based) implements a similar MCTP-based architecture:
+
+```
+Caliptra MCU SW Architecture:
+
+┌─────────────────────────────────────────┐
+│  Userspace Applications                 │
+│  (SPDM, PLDM, Vendor-defined)           │
+└────────────────┬────────────────────────┘
+                 │ Syscalls
+┌────────────────▼────────────────────────┐
+│  MCTP Drivers (4 instances)             │
+│  ├── SPDM (0xA0000)                     │
+│  ├── Secure SPDM (0xA0001)              │
+│  ├── PLDM (0xA0002)                     │
+│  └── Caliptra VDM (0xA0003)             │
+└────────────────┬────────────────────────┘
+                 │
+┌────────────────▼────────────────────────┐
+│  MuxMCTPDriver (message multiplexing)   │
+└────────────────┬────────────────────────┘
+                 │
+┌────────────────▼────────────────────────┐
+│  MCTPI3CBinding (transport binding)     │
+└────────────────┬────────────────────────┘
+                 │
+┌────────────────▼────────────────────────┐
+│  I3CCore (single I3C target device)     │
+└─────────────────────────────────────────┘
+```
+
+|===
+| Aspect | Hubris MCTP | Caliptra MCU SW
+
+| Transport
+| I2C (generic)
+| I3C (fixed)
+
+| Multiplexing
+| MCTP server's `listener(msg_type)`
+| MuxMCTPDriver routing to separate drivers
+
+| Physical Layer Flexibility
+| I2C can be used for non-MCTP
+| I3C exclusively bound to MCTP
+
+| Task Isolation
+| Hubris task model
+| Tock capsule model
+|===
+
+**Common Design Pattern**: Both follow the layered approach:
+```
+Application (SPDM/PLDM) → Transport (MCTP) → Physical (I2C/I3C)
+```
+
+Both projects concluded that protocol demultiplexing belongs at the MCTP layer
+via message type, not at the physical layer.
+
+=== Transport Details Comparison
+
+|===
+| Parameter | Hubris MCTP-over-I2C | Caliptra MCTP-over-I3C
+
+| MTU
+| 255 bytes (SMBus limit)
+| 68 bytes (69 - 1 PEC)
+
+| Integrity
+| None at I2C layer (optional at MCTP)
+| SMBus CRC8 PEC
+
+| Flow Control
+| None
+| IBI (In-Band Interrupt) or polling
+|===
+
+== app.toml Configuration
+
+=== MCTP Server Task
+
+```toml
+[tasks.mctp_server]
+name = "mctp-server"
+priority = 3
+max-sizes = {flash = 32867, ram = 16384}
+start = true
+stacksize = 12288
+task-slots = ["uart_driver", "i2c_driver"]
+notifications = ["rx-data", "i2c-rx", "timer"]
+features = ["serial_log", "transport_i2c"]
+```
+
+=== I2C Driver Task
+
+```toml
+[tasks.i2c_driver]
+name = "drv-openprot-i2c-server"
+priority = 2
+max-sizes = {flash = 16384, ram = 4096}
+start = true
+stacksize = 2048
+notifications = ["i2c-irq"]
+```
+
+Key configuration points:
+
+- `task-slots = ["i2c_driver"]` - Grants MCTP server access to I2C driver
+- `notifications = ["i2c-rx"]` - Notification bit for slave receive events
+- `features = ["transport_i2c"]` - Enables I2C transport in MCTP server
+
+== Current Implementation Limitations
+
+The MCTP server implementation (`task/mctp-server/`) has several hardcoded values that
+limit flexibility:
+
+=== Hardcoded Controller
+
+The I2C controller is hardcoded to `Controller::I2C1`:
+
+```rust
+// task/mctp-server/src/i2c.rs:38
+let i2c = I2cDevice::new(
+    self.i2c_driver_task,
+    Controller::I2C1,  // Hardcoded
+    PortIndex(0),
+    None,
+    addr,
+);
+```
+
+**Impact**: Cannot use different I2C controllers without code changes.
+
+**Future Work**: Make controller configurable via app.toml or build-time configuration.
+
+=== Hardcoded Destination Address
+
+The destination I2C address for transmit is hardcoded:
+
+```rust
+// task/mctp-server/src/i2c.rs:35
+// TODO The stack needs to provide the destination EID to the sender
+let addr = 0x42;  // Hardcoded destination
+```
+
+**Impact**: All MCTP responses go to the same I2C address (0x42), regardless of
+the actual source. This works for single-master scenarios but breaks multi-endpoint
+communication.
+
+**Future Work**: Implement neighbor table lookup to map EID → I2C address.
+
+=== Missing Neighbor Table
+
+The MCTP stack should maintain a neighbor table mapping Endpoint IDs to physical
+addresses:
+
+```rust
+// Desired implementation (not yet implemented)
+let addr = self
+    .neighbor_table
+    .get(destination_eid)
+    .ok_or(mctp::Error::Unreachable)?;
+```
+
+**Impact**: Cannot route responses to different physical endpoints based on EID.
+
+**Future Work**:
+1. Implement `NeighborTable` struct with EID → I2C address mapping
+2. Populate table during MCTP endpoint discovery
+3. Use table for outbound message routing
+
+=== Summary of Hardcoded Values
+
+|===
+| Item | Current Value | Location | Impact
+
+| I2C Controller
+| `Controller::I2C1`
+| `i2c.rs:38`, `main.rs:83`
+| Single controller only
+
+| Destination Address
+| `0x42`
+| `i2c.rs:35`
+| Single destination only
+
+| Own Address
+| `I2C_OWN_ADDR` (configurable)
+| `main.rs`
+| OK - already configurable
+
+| Port Index
+| `PortIndex(0)`
+| `i2c.rs:39`
+| Single port only
+|===
+
+=== Deployment Topology Context
+
+The hardcoded values work for the current **single-master RoT deployment** topology:
+
+**Single-Master RoT Deployment (Current):**
+```
+┌─────────────────────┐                      ┌─────────────────────┐
+│        BMC          │                      │        RoT          │
+│   (I2C Master)      │      I2C Bus         │   (I2C Slave)       │
+│                     │ ◄──────────────────► │                     │
+│  Address: 0x42      │    MCTP-over-I2C     │  Address: 0x12      │
+│  EID: 0x08          │                      │  EID: 0x0A          │
+│                     │                      │                     │
+│  - Initiates all    │                      │  - Responds only    │
+│    transactions     │                      │  - Never initiates  │
+│  - Single peer      │                      │  - Single peer      │
+└─────────────────────┘                      └─────────────────────┘
+```
+
+**Why hardcoded values work here:**
+
+- Only one master (BMC) ever sends requests to the RoT
+- RoT always responds to the same address (0x42)
+- No routing decisions needed - there's only one peer
+- EID→address mapping is trivial (0x08 → 0x42)
+
+**Multi-Endpoint MCTP Network (Future - Not Supported):**
+```
+                         ┌─────────────────────┐
+                         │        BMC          │
+                         │   Address: 0x42     │
+                         │   EID: 0x08         │
+                         └──────────┬──────────┘
+                                    │
+         ┌──────────────────────────┼──────────────────────────┐
+         │                          │                          │
+         │ I2C Bus                  │                          │
+         │                          │                          │
+┌────────▼────────┐       ┌─────────▼─────────┐      ┌─────────▼─────────┐
+│      RoT        │       │       NIC         │      │       GPU         │
+│  Address: 0x12  │       │  Address: 0x30    │      │  Address: 0x50    │
+│  EID: 0x0A      │       │  EID: 0x0C        │      │  EID: 0x0E        │
+└─────────────────┘       └───────────────────┘      └───────────────────┘
+```
+
+**What would break:**
+
+- RoT receives message from NIC (EID 0x0C, address 0x30)
+- RoT needs to respond to 0x30, not hardcoded 0x42
+- Current implementation sends response to wrong address
+- Requires neighbor table: EID 0x0C → address 0x30
+
+**Requirements for Multi-Endpoint Support:**
+
+1. **Neighbor Table**: Map EID → I2C address dynamically
+2. **MCTP Discovery**: Learn endpoints via Get Endpoint ID commands
+3. **Source Tracking**: Extract source EID from incoming MCTP headers
+4. **Configurable Controller**: Select I2C controller at runtime or build time
+
+== Error Handling
+
+=== I2C Layer Errors
+
+The MCTP server handles I2C-layer errors gracefully:
+
+```rust
+match i2c_recv.get_slave_message() {
+    Ok(slave_msg) => { /* process */ }
+    Err(ResponseCode::NoSlaveMessage) => {
+        // Spurious notification - timing race, ignore
+    }
+    Err(ResponseCode::SlaveNotEnabled) => {
+        // Configuration error - re-enable or panic
+    }
+    Err(e) => {
+        log::warn!("Unexpected I2C error: {:?}", e);
+    }
+}
+```
+
+=== MCTP Layer Errors
+
+Protocol-level errors are handled by the MCTP stack:
+
+- **Packet decode errors**: Malformed headers, invalid EID
+- **Reassembly errors**: Missing packets, sequence mismatch
+- **Timeout errors**: Response deadline exceeded
+
+=== Silent Message Loss
+
+Due to the single message buffer design, messages can be silently lost if:
+
+1. Multiple messages arrive before the MCTP server processes the first
+2. High-frequency traffic exceeds processing rate
+
+**Mitigation**: MCTP protocols (SPDM, PLDM) include request/response semantics
+with retransmission. The requesting endpoint retransmits on timeout.
+
+== Performance Considerations
+
+=== Latency
+
+The notification path from I2C interrupt to MCTP server processing:
+
+1. Hardware interrupt triggers
+2. I2C driver wakes, reads data, stores in buffer
+3. I2C driver posts notification via `sys_post()`
+4. MCTP server wakes via `sys_recv_open()`
+5. MCTP server calls `get_slave_message()`
+6. MCTP stack processes packet
+
+Typical latency: 10-100 microseconds depending on task priorities.
+
+=== Throughput
+
+Limited by:
+- Single message buffer (no concurrent message handling)
+- MCTP stack processing time
+- Response generation latency
+
+For typical RoT workloads (SPDM authentication, PLDM sensors), the current
+design provides adequate throughput.
+
+== Future Enhancements
+
+Potential improvements to the MCTP-I2C integration:
+
+1. **Message queuing** - Replace single buffer with queue for burst handling
+2. **Multiple transports** - Concurrent I2C + SPI transports
+3. **Hardware flow control** - Leverage clock stretching where available
+4. **Zero-copy paths** - Direct buffer handoff for large messages
+
+See link:i2c-slave-mode-architecture.adoc#limitations[I2C Slave Mode Limitations]
+for detailed analysis of current constraints.
