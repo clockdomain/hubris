@@ -26,11 +26,13 @@ This document describes the architecture for slave mode support in Hubris, indep
 │  - Business logic                                   │
 │  - Uses high-level API                              │
 └──────────────────┬──────────────────────────────────┘
-                   │ drv-i2c-api
+                   │ drv-i2c-api (I2cDevice methods)
                    │ - configure_slave_address()
                    │ - enable_slave_receive()
                    │ - enable_slave_notification()
                    │ - get_slave_message()
+                   │ - disable_slave_notification()
+                   │ - disable_slave_receive()
                    ▼
 ┌─────────────────────────────────────────────────────┐
 │  FRAMEWORK LAYER                                    │
@@ -38,18 +40,22 @@ This document describes the architecture for slave mode support in Hubris, indep
 │  - Notification delivery via sys_post()             │
 │  - Operation dispatch                               │
 │  - Hardware abstraction (I2cHardware trait)         │
+│  - Single message buffer per controller             │
 └──────────────────┬──────────────────────────────────┘
-                   │ Hardware trait calls
+                   │ Hardware trait calls (I2cHardware)
                    │ - configure_slave_mode()
                    │ - enable_slave_receive()
-                   │ - poll_slave_messages()
+                   │ - disable_slave_receive()
+                   │ - check_slave_data()
+                   │ - read_slave_data()
+                   │ - clear_slave_interrupts()
                    ▼
 ┌─────────────────────────────────────────────────────┐
 │  HARDWARE LAYER                                     │
 │  - Platform-specific driver (AST1060, STM32, etc.)  │
 │  - Register manipulation                            │
 │  - Interrupt handling                               │
-│  - Software buffering (if no hardware FIFO)         │
+│  - Hardware buffer management                       │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -57,9 +63,96 @@ This document describes the architecture for slave mode support in Hubris, indep
 
 1. **Hardware Agnostic**: Application code works across different I2C controllers
 2. **Interrupt Driven**: Low latency, power efficient notification model
-3. **Safe Buffering**: Messages buffered in driver, not lost during processing
-4. **Single Subscriber**: One task per controller for simple ownership model
+3. **Single Message Buffer**: Minimizes memory usage; client must retrieve promptly
+4. **Single Subscriber**: One task can receive notifications at a time
 5. **Protocol Neutral**: Framework doesn't interpret message contents
+
+== Data Types
+
+=== SlaveMessage
+
+```rust
+/// Represents a message received while operating in I2C slave mode
+pub struct SlaveMessage {
+    /// The 7-bit I2C address of the master that sent this message
+    pub source_address: u8,
+    /// Length of the message data in bytes (0-255)
+    pub data_length: u8,
+    /// The message data (only first data_length bytes are valid)
+    pub data: [u8; 255],
+}
+
+impl SlaveMessage {
+    /// Get the valid data portion of this message
+    pub fn data(&self) -> &[u8] {
+        &self.data[..self.data_length as usize]
+    }
+}
+```
+
+=== SlaveConfig
+
+```rust
+/// Configuration for I2C slave mode operation
+pub struct SlaveConfig {
+    pub controller: Controller,  // Which I2C controller (I2C0-I2C7)
+    pub port: PortIndex,         // Port/pin configuration
+    pub address: u8,             // 7-bit slave address (0x08-0x77)
+}
+```
+
+=== Controller
+
+```rust
+/// I2C controller identifier
+pub enum Controller {
+    I2C0 = 0,
+    I2C1 = 1,
+    I2C2 = 2,
+    I2C3 = 3,
+    I2C4 = 4,
+    I2C5 = 5,
+    I2C6 = 6,
+    I2C7 = 7,
+}
+// Note: AST1060 supports I2C0-I2C13, but Controller enum currently defines 0-7
+```
+
+=== ResponseCode (Slave-Specific)
+
+```rust
+pub enum ResponseCode {
+    // ... other codes ...
+    SlaveAddressInUse,          // Address already configured
+    SlaveNotSupported,          // Slave mode not supported on this controller
+    SlaveNotEnabled,            // Slave receive not enabled
+    SlaveBufferFull,            // Buffer overflow (messages may be dropped)
+    BadSlaveAddress,            // Invalid address (reserved or out of range)
+    SlaveConfigurationFailed,   // Hardware configuration failed
+    NoSlaveMessage,             // No message available
+    NotificationFailed,         // Failed to register for notifications
+}
+```
+
+=== IPC Operations
+
+The following `Op` codes are used for slave mode IPC:
+
+```rust
+pub enum Op {
+    // Master mode operations...
+    WriteRead = 1,
+    WriteReadBlock = 2,
+
+    // Slave mode operations
+    ConfigureSlaveAddress = 3,     // Set slave address
+    EnableSlaveReceive = 4,        // Start listening for messages
+    DisableSlaveReceive = 5,       // Stop listening
+    EnableSlaveNotification = 6,   // Register for notifications
+    DisableSlaveNotification = 7,  // Unregister notifications
+    GetSlaveMessage = 8,           // Retrieve received message
+}
+```
 
 == Components
 
@@ -100,9 +193,13 @@ This document describes the architecture for slave mode support in Hubris, indep
 - Buffer messages between hardware and application
 
 **Key State:**
-- Per-controller notification subscriber: `Option<(TaskId, u32)>`
-- Per-controller message buffer: `Deque<SlaveMessage, N>`
-- Statistics: messages received, dropped, etc.
+- Global notification subscriber: `Option<(TaskId, u32)>` (one client at a time)
+- Single pending message buffer: `Option<(u8, SlaveMessage)>` (controller_id, message)
+- Slave configuration per controller
+
+NOTE: The current implementation uses a single message buffer rather than a queue.
+This minimizes memory usage but requires clients to retrieve messages promptly
+before the next interrupt overwrites the buffer.
 
 **Notification Flow:**
 ```
@@ -133,14 +230,14 @@ Different I2C controllers have different capabilities:
 | Hardware FIFO
 | ✓ (32 bytes)
 | ✓ (16 bytes)
-| ✗ (32-byte buffer only)
+| 32-byte packet buffer
 
 | Automatic queuing
 | ✓
 | ✓
 | ✗
 
-| Software buffering required
+| Single message buffer
 | Optional
 | Optional
 | **Required**
@@ -153,8 +250,14 @@ Different I2C controllers have different capabilities:
 | Number of controllers
 | 4
 | ~4
-| 14
+| 14 (I2C0-I2C13)
 |===
+
+**AST1060 Specifics:**
+The AST1060 uses a 32-byte hardware packet buffer (not a FIFO). Each received
+packet must be read before the next packet arrives. The driver stores the
+received data in a single `SlaveMessage` buffer, and clients must retrieve
+messages via `get_slave_message()` in response to notifications.
 
 **Abstraction Goal:** Hide these differences from upper layers
 
@@ -253,168 +356,112 @@ T=256µs+   Client processes message
 
 == Buffering Strategy
 
-=== Why Software Buffering?
+=== Current Implementation: Single Message Buffer
 
-**Problem:**
+The current implementation uses a **single message buffer** per driver instance:
+
+```rust
+// In openprot-i2c-server
+let mut pending_slave_msg: Option<(u8, SlaveMessage)> = None;
+let mut notification_client: Option<(TaskId, u32)> = None;
+```
+
+**Design Rationale:**
+- Minimizes memory usage on resource-constrained platforms
+- Matches the interrupt-driven model where each interrupt corresponds to one message
+- Simplifies implementation and reduces stack usage
+- Client must retrieve messages promptly before next interrupt
+
+**Message Flow:**
+
+Actors:
+
+- **Master**: External I2C master device (e.g., BMC, host processor) - outside Hubris
+- **Hardware**: I2C controller peripheral (e.g., AST1060 I2C2) - generates interrupts
+- **Driver**: `openprot-i2c-server` task running in Hubris - handles interrupts, buffers messages
+- **Client**: Application task (e.g., MCTP server) running in Hubris - processes messages
+
 ```
 Time →
 
-Master         Driver                 Client
-  |              |                      |
-  | Write[Msg1]  |                      |
-  |------------->| Buffer Msg1          |
-  |              | sys_post()           |
-  |              |--------------------->|
-  | Write[Msg2]  |                      | (processing Msg1)
-  |------------->| Buffer Msg2          |
-  |              | (no notification)    |
-  | Write[Msg3]  |                      |
-  |------------->| Buffer Msg3          |
-  |              |                      |
-  |              |<---------------------|get_message() [Msg1]
-  |              |--------------------->|
-  |              |                      | (processing Msg1)
-  |              |<---------------------|get_message() [Msg2]
-  |              |--------------------->|
-  |              |                      | (processing Msg2)
-  |              |<---------------------|get_message() [Msg3]
+Master         Hardware       Driver                 Client
+(external)     (I2C periph)   (i2c server)           (app task)
+  |              |              |                      |
+  | Write[Msg1]  |              |                      |
+  |------------->| IRQ          |                      |
+  |              |------------->| read_slave_data()    |
+  |              |              | Store Msg1           |
+  |              |              | sys_post()           |
+  |              |              |--------------------->|
+  |              |              |                      | (wakes up)
+  |              |              |<---------------------|get_slave_message()
+  |              |              |--------------------->| Returns Msg1
+  |              |              |                      | (processing Msg1)
+  | Write[Msg2]  |              |                      |
+  |------------->| IRQ          |                      |
+  |              |------------->| read_slave_data()    |
+  |              |              | Store Msg2           |
+  |              |              | sys_post()           |
+  |              |              |--------------------->|
 ```
 
-Without buffering, messages would be lost while client processes previous message.
+**Important Constraint:**
+If a second message arrives before the client retrieves the first, the first
+message will be overwritten. Protocols like MCTP handle this at higher layers
+with sequence numbers and retransmission.
 
-=== Buffer Sizing
+=== Overflow Handling
 
-**Formula:**
-```
-Buffer Size = (Message Rate × Processing Latency) + Burst Capacity
-```
+**Current Implementation:**
+When a new message arrives and one is already pending, the new message
+overwrites the old one. The client receives `ResponseCode::NoSlaveMessage`
+if they call `get_slave_message()` after the message has been overwritten.
 
-**Example Calculation:**
-```
-Message Rate: 100 messages/sec = 1 message per 10ms
-Processing Latency: 2ms per message
-Burst Capacity: 3 messages (safety margin)
-
-Buffer Size = (100 msg/s × 0.002s) + 3 = 0.2 + 3 ≈ 4 messages
-```
-
-**Recommendations:**
-- **Low Rate** (< 10 msg/s): 2-4 messages
-- **Medium Rate** (10-100 msg/s): 4-8 messages
-- **High Rate** (> 100 msg/s): 8-16 messages
-- **Burst Traffic**: Add safety margin based on max burst size
-
-**Platform Constraints:**
-```
-AST1060:  256KB RAM → can afford 8 messages per controller
-STM32H7:  1MB RAM → can afford 16 messages per controller
-LPC55:    256KB RAM → limit to 4-8 messages per controller
-```
-
-=== Buffer Overflow Policy
-
-**When buffer is full:**
-
-**Option 1: Drop Newest (Recommended)**
-```rust
-if buffer.is_full() {
-    drop_count += 1;
-    return; // Drop incoming message
-}
-```
-
-✅ Simple, predictable
-✅ Preserves oldest (potentially more important) messages
-❌ May lose latest state updates
-
-**Option 2: Drop Oldest**
-```rust
-if buffer.is_full() {
-    buffer.pop_front(); // Drop oldest
-}
-buffer.push_back(new_message);
-```
-
-✅ Always gets latest message
-❌ May lose important early messages
-❌ More complex
-
-**Option 3: Flow Control** (Hardware dependent)
-```rust
-if buffer.is_full() {
-    hardware.nack_next_transaction();
-}
-```
-
-✅ No message loss
-❌ Requires hardware support
-❌ May stall master
-
-**Recommended: Option 1 with protocol retry**
-- Protocol layer (MCTP, SMBus) handles retries
-- Simple driver implementation
-- Track drops for diagnostics
+**Protocol-Level Mitigation:**
+- MCTP uses sequence numbers to detect missing packets
+- SMBus uses PEC (Packet Error Checking) for integrity
+- Higher-layer protocols handle retransmission
 
 == Notification Model
 
 === Single Subscriber Pattern
 
-**Design Decision:** One task per controller/port can subscribe to notifications
+**Design Decision:** One task globally can subscribe to slave notifications
+
+The current implementation uses a single global `notification_client: Option<(TaskId, u32)>`.
+This means only one task in the entire system can receive slave mode notifications at a time,
+regardless of which I2C controller the message arrives on.
 
 **Rationale:**
-1. **Simplicity**: Single `Option<(TaskId, u32)>` per controller
-2. **Clear Ownership**: One task owns slave mode per controller
-3. **Typical Usage**: Most systems have one protocol handler per bus
-4. **Multiple Controllers**: Different tasks can use different controllers
+1. **Simplicity**: Single global `Option<(TaskId, u32)>` minimizes state
+2. **Clear Ownership**: One task owns all slave mode traffic
+3. **Typical Usage**: Most systems have a single protocol handler (e.g., MCTP server)
+4. **Message Routing**: The single subscriber can route messages based on controller ID
 
-**Example Architecture:**
+**Current Architecture:**
 ```
-┌──────────────────────┐
-│ I2C0 → Task A        │ (MCTP endpoint)
-│ I2C1 → Task A        │ (Secondary MCTP)
-│ I2C2 → Task B        │ (PMBus monitoring)
-│ I2C3 → (unused)      │
-└──────────────────────┘
-```
-
-**Multiple Tasks on Same Controller?**
-Use a dispatcher task:
-```
-I2C0 → Dispatcher Task → Routes to Task A or Task B based on message content
+┌──────────────────────────────────────────────┐
+│ All I2C controllers → Single Subscriber Task │
+│   I2C0 ─┐                                    │
+│   I2C1 ─┼──→ notification_client (one task)  │
+│   I2C2 ─┘                                    │
+└──────────────────────────────────────────────┘
 ```
 
-=== Notification vs Polling
+**Limitation: No Controller Identification**
 
-|===
-| Aspect | Notification (Recommended) | Polling (Deprecated)
+The `SlaveMessage` struct does not include a controller ID field. When messages arrive,
+the client cannot determine which I2C controller received the message.
 
-| Latency
-| Low (µs)
-| High (ms)
+**Impact for MCTP-based deployments:** This limitation is **not a concern** for typical
+MCTP deployments. Source identification occurs at the MCTP layer via the source EID
+field in the MCTP header. Whether using SPDM, PLDM, or vendor-defined messages, the
+MCTP stack properly tracks message sources through the protocol's own addressing.
 
-| CPU Usage
-| Minimal (event-driven)
-| High (continuous polling)
-
-| Power
-| Efficient (sleep until event)
-| Inefficient (always active)
-
-| Complexity
-| Moderate (async handling)
-| Simple (sync loop)
-
-| Scalability
-| Good (multiple sources)
-| Poor (polling overhead)
-|===
-
-**When to use polling:**
-- Legacy code migration
-- Hardware without interrupt support
-- Extreme simplicity required
-
-**Recommended: Always use notifications for new code**
+**Impact for non-MCTP scenarios:** If multiple I2C controllers were configured for
+different non-MCTP protocols simultaneously, the lack of controller ID would prevent
+protocol disambiguation. Such scenarios would require extending `SlaveMessage` to
+include the controller ID, or using separate I2C driver instances per protocol.
 
 == Protocol Integration
 
@@ -422,35 +469,77 @@ I2C0 → Dispatcher Task → Routes to Task A or Task B based on message content
 
 **Management Component Transport Protocol**
 
-```rust
-// MCTP endpoint configuration
-const MCTP_EID: u8 = 0x1D; // Our endpoint ID
+This example is based on the actual `task/mctp-server/src/main.rs` implementation:
 
-device.configure_slave_address(MCTP_EID)?;
-device.enable_slave_receive()?;
-device.enable_slave_notification(MCTP_NOTIF)?;
+```rust
+use drv_i2c_api::*;
+use userlib::*;
+
+// MCTP endpoint configuration
+const I2C_OWN_ADDR: u8 = 0x12; // Our I2C slave address
+
+// Create device handle (address field unused for slave mode)
+let i2c_recv = I2cDevice::new(
+    I2C.get_task_id(),
+    Controller::I2C1,
+    PortIndex(0),
+    None,
+    0x00, // Address unused for slave mode; configured via configure_slave_address()
+);
+
+// Configure slave mode
+i2c_recv.configure_slave_address(I2C_OWN_ADDR).unwrap_lite();
+i2c_recv.enable_slave_receive().unwrap_lite();
+i2c_recv.enable_slave_notification(notifications::I2C_RX_BIT).unwrap_lite();
+
+let mut msg_buf = [0u8; 256];
+let notification_mask = notifications::I2C_RX_MASK | notifications::TIMER_MASK;
 
 loop {
-    let msg = sys_recv_open(&mut buf, MCTP_NOTIF);
-    if let Ok(slave_msg) = device.get_slave_message() {
-        // Parse MCTP header
-        let mctp_hdr = parse_mctp_header(slave_msg.data());
-        
-        // Route based on message type
-        match mctp_hdr.message_type {
-            MCTP_TYPE_CONTROL => handle_control(mctp_hdr),
-            MCTP_TYPE_PLDM => handle_pldm(mctp_hdr),
-            MCTP_TYPE_NCSI => handle_ncsi(mctp_hdr),
-            _ => {} // Unknown
+    let msg = sys_recv_open(&mut msg_buf, notification_mask);
+
+    if msg.sender == TaskId::KERNEL {
+        // Handle I2C slave receive notification
+        if (msg.operation & notifications::I2C_RX_MASK) != 0 {
+            match i2c_recv.get_slave_message() {
+                Ok(slave_msg) => {
+                    let data = slave_msg.data();
+                    log::trace!("I2C MCTP RX: {:02x?}", data);
+
+                    // Decode MCTP-over-I2C packet and process
+                    match i2c_reader.recv(data) {
+                        Ok(pkt) => {
+                            server.stack.inbound(pkt)?;
+                        }
+                        Err(e) => {
+                            log::warn!("I2C MCTP decode error: {:?}", e);
+                        }
+                    }
+                }
+                Err(ResponseCode::NoSlaveMessage) => {
+                    // Spurious notification, ignore
+                }
+                Err(e) => {
+                    log::warn!("I2C slave message error: {:?}", e);
+                }
+            }
         }
+
+        // Handle timer for protocol timeouts
+        if (msg.operation & notifications::TIMER_MASK) != 0 {
+            server.update(sys_get_timer().now);
+        }
+    } else {
+        // Handle IPC messages from other tasks
+        handle_mctp_msg(&msg_buf, msg, &mut server);
     }
 }
 ```
 
 **Key Requirements:**
-- Multi-packet message reassembly
+- Multi-packet message reassembly (handled by `mctp_stack`)
 - Source address routing for responses
-- Timeout handling
+- Timeout handling via timer notifications
 - Message fragmentation support
 
 === PMBus/SMBus
@@ -458,23 +547,43 @@ loop {
 **Power Management Bus**
 
 ```rust
+use drv_i2c_api::*;
+use userlib::*;
+
 // PMBus device address
 const PMBUS_ADDR: u8 = 0x40;
+const PMBUS_NOTIF: u32 = 0x0001;
+
+let device = I2cDevice::new(
+    i2c_task,
+    Controller::I2C1,
+    PortIndex(0),
+    None,
+    PMBUS_ADDR,
+);
 
 device.configure_slave_address(PMBUS_ADDR)?;
 device.enable_slave_receive()?;
 device.enable_slave_notification(PMBUS_NOTIF)?;
 
+let mut msg_buf = [0u8; 256];
 loop {
-    let msg = sys_recv_open(&mut buf, PMBUS_NOTIF);
-    if let Ok(slave_msg) = device.get_slave_message() {
-        let cmd = slave_msg.data()[0]; // First byte is command
-        
-        match cmd {
-            PMBUS_READ_VOUT => send_voltage_reading(),
-            PMBUS_READ_IOUT => send_current_reading(),
-            PMBUS_READ_TEMPERATURE => send_temperature(),
-            _ => {} // Unsupported command
+    let msg = sys_recv_open(&mut msg_buf, PMBUS_NOTIF);
+
+    if msg.sender == TaskId::KERNEL && (msg.operation & PMBUS_NOTIF) != 0 {
+        match device.get_slave_message() {
+            Ok(slave_msg) => {
+                let cmd = slave_msg.data()[0]; // First byte is command
+
+                match cmd {
+                    PMBUS_READ_VOUT => send_voltage_reading(),
+                    PMBUS_READ_IOUT => send_current_reading(),
+                    PMBUS_READ_TEMPERATURE => send_temperature(),
+                    _ => {} // Unsupported command
+                }
+            }
+            Err(ResponseCode::NoSlaveMessage) => {}
+            Err(_) => {}
         }
     }
 }
@@ -490,18 +599,40 @@ loop {
 
 **General Pattern:**
 ```rust
-device.configure_slave_address(custom_addr)?;
-device.enable_slave_receive()?;
-device.enable_slave_notification(NOTIF)?;
+use drv_i2c_api::*;
+use userlib::*;
 
+const CUSTOM_ADDR: u8 = 0x55;
+const RX_NOTIF: u32 = 0x0001;
+
+let device = I2cDevice::new(
+    i2c_task,
+    Controller::I2C1,
+    PortIndex(0),
+    None,
+    CUSTOM_ADDR,
+);
+
+device.configure_slave_address(CUSTOM_ADDR)?;
+device.enable_slave_receive()?;
+device.enable_slave_notification(RX_NOTIF)?;
+
+let mut msg_buf = [0u8; 256];
 loop {
-    let msg = sys_recv_open(&mut buf, NOTIF);
-    if let Ok(slave_msg) = device.get_slave_message() {
-        // Your protocol logic here
-        match parse_message(slave_msg.data()) {
-            Command::Read(reg) => send_register_value(reg),
-            Command::Write(reg, val) => write_register(reg, val),
-            Command::Status => send_status(),
+    let msg = sys_recv_open(&mut msg_buf, RX_NOTIF);
+
+    if msg.sender == TaskId::KERNEL && (msg.operation & RX_NOTIF) != 0 {
+        match device.get_slave_message() {
+            Ok(slave_msg) => {
+                // Your protocol logic here
+                match parse_message(slave_msg.data()) {
+                    Command::Read(reg) => send_register_value(reg),
+                    Command::Write(reg, val) => write_register(reg, val),
+                    Command::Status => send_status(),
+                }
+            }
+            Err(ResponseCode::NoSlaveMessage) => {}
+            Err(_) => {}
         }
     }
 }
@@ -528,39 +659,57 @@ loop {
 
 === Error Recovery
 
-**Buffer Overflow:**
-```rust
-let status = device.get_slave_status(Controller::I2C0)?;
-if status.messages_dropped > acceptable_threshold {
-    log_error!("I2C0 dropping messages, rate too high");
-    // Consider:
-    // - Increasing buffer size
-    // - Optimizing processing speed
-    // - Adding flow control
-}
-```
-
-**Bus Errors:**
+**Handling NoSlaveMessage:**
 ```rust
 match device.get_slave_message() {
-    Err(ResponseCode::BusError) => {
-        // Reset bus
-        device.reset_bus()?;
-        
-        // Reconfigure slave
-        device.configure_slave_address(addr)?;
+    Ok(slave_msg) => {
+        // Process message
+        process_message(slave_msg.source_address, slave_msg.data());
+    }
+    Err(ResponseCode::NoSlaveMessage) => {
+        // Normal case: notification but message already retrieved
+        // or spurious notification
+    }
+    Err(ResponseCode::SlaveNotEnabled) => {
+        // Slave mode was disabled, re-enable if needed
         device.enable_slave_receive()?;
     }
-    _ => {}
+    Err(e) => {
+        // Log and handle other errors
+        log_error!("Slave receive error: {:?}", e);
+    }
 }
 ```
 
-**Hardware Reset:**
+**Configuration Errors:**
 ```rust
-// If hardware becomes unresponsive
+match device.configure_slave_address(0x1D) {
+    Ok(()) => {}
+    Err(ResponseCode::BadSlaveAddress) => {
+        // Address is reserved (0x00-0x07, 0x78-0x7F) or > 0x7F
+        log_error!("Invalid slave address");
+    }
+    Err(ResponseCode::SlaveAddressInUse) => {
+        // Another task already configured this address
+        log_error!("Slave address already in use");
+    }
+    Err(ResponseCode::SlaveNotSupported) => {
+        // This controller doesn't support slave mode
+        log_error!("Slave mode not supported");
+    }
+    Err(e) => {
+        log_error!("Configuration failed: {:?}", e);
+    }
+}
+```
+
+**Reconfiguration After Error:**
+```rust
+// If communication becomes unreliable
+device.disable_slave_notification()?;
 device.disable_slave_receive()?;
-device.reset_bus()?;
-// Wait for bus idle
+
+// Re-initialize
 device.configure_slave_address(addr)?;
 device.enable_slave_receive()?;
 device.enable_slave_notification(mask)?;
@@ -620,21 +769,31 @@ Custom: Depends on protocol complexity
 
 === Memory Footprint
 
-**Per Controller (8-message buffer):**
+**SlaveMessage Structure:**
+```rust
+pub struct SlaveMessage {
+    pub source_address: u8,     // 1 byte
+    pub data_length: u8,        // 1 byte
+    pub data: [u8; 255],        // 255 bytes
+}
+// Total: 257 bytes per message
 ```
-SlaveState struct:
-  - message_queue: 8 × 257 bytes = 2056 bytes
-  - metadata: ~32 bytes
-  - Total: ~2088 bytes
 
-For 2 active controllers: ~4176 bytes (~1.6% of 256KB)
+**Current Implementation (Single Buffer):**
 ```
+pending_slave_msg: Option<(u8, SlaveMessage)>
+  - controller_id: 1 byte
+  - SlaveMessage: 257 bytes
+  - Option overhead: ~1 byte
+  - Total: ~260 bytes
 
-**Scaling:**
-```
-Small system (1 slave): ~2KB
-Medium system (2-3 slaves): ~6KB
-Large system (5+ slaves): ~10KB+
+notification_client: Option<(TaskId, u32)>
+  - TaskId: 4 bytes
+  - notification mask: 4 bytes
+  - Option overhead: ~1 byte
+  - Total: ~10 bytes
+
+Total driver state: ~270 bytes
 ```
 
 == Testing Strategy
@@ -662,19 +821,22 @@ fn test_slave_receive() {
 
 === Integration Testing
 
-**Loopback Test:**
-```rust
-// One task as master, another as slave
-// Task A: Master writes to address
-// Task B: Slave receives and verifies
+**External Master (Required):**
+
+I2C slave mode requires an external master device for testing. The codebase
+includes support for testing with an Aardvark I2C adapter:
+
+- `drv/ast1060-i2c/aardvark_test.py` - Python test automation
+- `drv/ast1060-i2c/TEST-PLAN.md` - Hardware validation test cases
+- `drv/ast1060-i2c/AARDVARK-BRINGUP.md` - Hardware setup guide
+
+```bash
+# Example: Run slave receive test with Aardvark
+python3 aardvark_test.py --test slave_receive --address 0x1D
 ```
 
-**External Master:**
-```rust
-// Use external I2C master (Linux, test fixture)
-// Send test patterns
-// Verify slave receives correctly
-```
+NOTE: Loopback testing (same device as master and slave) is not supported
+by most I2C controllers including the AST1060.
 
 === Performance Testing
 
@@ -699,70 +861,215 @@ fn test_slave_receive() {
 // Check buffer overflow handling
 ```
 
-== Migration Guide
+== Limitations
 
-=== From Polling to Notifications
+=== MCTP-Based Protocol Stacks (SPDM, PLDM)
 
-**Recommended Pattern (Interrupt-Driven):**
-```rust
-device.enable_slave_notification(0x0001)?;
+For protocols that run **over MCTP** (SPDM, PLDM, vendor-defined), the current design scales well:
 
-loop {
-    let msg = sys_recv_open(&mut buf, 0x0001);
-    if msg.sender == TaskId::KERNEL {
-        if let Ok(slave_msg) = device.get_slave_message() {
-            process_message(slave_msg);
-        }
-    }
-}
+```
+┌─────────────────────────────────────────────────┐
+│  SPDM Task        PLDM Task        Vendor Task  │  ← Multiple listeners
+│      │                │                │        │
+│      └────────────────┼────────────────┘        │
+│                       ▼                         │
+│              MCTP Server                        │  ← Multiplexes by msg_type
+│           (listener per msg_type)               │
+│                       │                         │
+│                       ▼                         │
+│            I2C Slave Driver                     │  ← Single subscriber OK
+│         (single notification_client)            │
+└─────────────────────────────────────────────────┘
 ```
 
-**Benefits:**
-- Lower latency: 25µs vs 10ms
-- Lower CPU usage: Event-driven vs polling
-- Better power: Sleep when idle
+The MCTP server's `listener(msg_type)` API allows multiple tasks to register for different
+MCTP message types (SPDM=0x05, PLDM=0x01, etc.). The I2C slave layer only needs to deliver
+raw bytes to the single MCTP server, which handles protocol demultiplexing.
 
-=== From Other I2C Frameworks
+=== Non-MCTP Multi-Protocol Scenarios
 
-**Bare Metal:**
-- Add task-based structure
-- Replace direct interrupt handling with notifications
-- Use IPC instead of direct calls
+The current implementation is designed for single-protocol deployments at the I2C layer.
+For scenarios requiring **multiple independent I2C protocols** (not over MCTP), limitations apply:
 
-**Arduino/Embedded:**
-- Replace callbacks with notification loop
-- Add proper error handling
-- Use Hubris memory safety
+|===
+| Limitation | Current State | RoT Requirement
 
-**Linux I2C Slave:**
-- Similar concepts (callback on receive)
-- Replace with notification-based model
-- More explicit buffer management
+| Notification subscribers
+| 1 global (all controllers → 1 task)
+| Per-controller or per-protocol subscribers
+
+| Message buffer
+| 1 message (overwrites on overflow)
+| Queue to handle burst traffic without loss
+
+| Controller identification
+| `SlaveMessage` lacks controller ID
+| Client needs to know which controller received message
+
+| Overflow handling
+| Silent overwrite
+| Error signaling, no silent message loss
+
+| Concurrent I2C protocols
+| Single protocol only
+| MCTP + raw PMBus + debug simultaneously (separate I2C buses)
+|===
+
+**Workarounds for current limitations:**
+
+1. **Single protocol per deployment** - Current design works well
+2. **Dispatcher task** - One task receives all messages, routes based on content (not controller)
+3. **Separate I2C driver instances** - Deploy multiple `openprot-i2c-server` tasks for different controllers (increases memory usage)
+
+**Enhancements needed for full RoT support:**
+
+1. Add `controller: Controller` field to `SlaveMessage`
+2. Change `notification_client` from `Option<(TaskId, u32)>` to per-controller map
+3. Replace single message buffer with a queue (`heapless::Deque`)
+4. Add `ResponseCode::SlaveBufferFull` for overflow signaling
+
+=== Comparison with Caliptra MCU SW
+
+The Caliptra MCU SW project (Tock OS-based) implements a similar MCTP-over-I3C architecture.
+This comparison highlights shared limitations and architectural differences:
+
+```
+Caliptra MCU SW Architecture:
+
+┌─────────────────────────────────────────┐
+│  Userspace Applications                 │
+│  (SPDM, PLDM, Vendor-defined)           │
+└────────────────┬────────────────────────┘
+                 │ Syscalls
+┌────────────────▼────────────────────────┐
+│  MCTP Drivers (4 instances)             │
+│  ├── SPDM (0xA0000)                     │
+│  ├── Secure SPDM (0xA0001)              │
+│  ├── PLDM (0xA0002)                     │
+│  └── Caliptra VDM (0xA0003)             │
+└────────────────┬────────────────────────┘
+                 │
+┌────────────────▼────────────────────────┐
+│  MuxMCTPDriver (message multiplexing)   │
+└────────────────┬────────────────────────┘
+                 │
+┌────────────────▼────────────────────────┐
+│  MCTPI3CBinding (transport binding)     │
+└────────────────┬────────────────────────┘
+                 │
+┌────────────────▼────────────────────────┐
+│  I3CCore (single I3C target device)     │
+└─────────────────────────────────────────┘
+```
+
+|===
+| Limitation | Hubris I2C Slave | Caliptra MCU SW | Notes
+
+| Message Buffer
+| Single `Option<SlaveMessage>` with overwrite
+| Single `OptionalCell<BufferedMessage>` with overwrite
+| **SAME** - both lose messages on overflow
+
+| Subscriber Model
+| One global `notification_client`
+| One app per message type (first match wins)
+| **SIMILAR** - neither supports broadcast
+
+| Overflow Handling
+| Silent overwrite
+| Silent overwrite with `println()` warning
+| **SAME** - no error signaling to sender
+
+| Concurrent MCTP Protocols
+| Via MCTP server's `listener(msg_type)` API
+| Via MuxMCTPDriver routing to separate drivers
+| **SAME** - both multiplex at MCTP layer
+
+| Transport Abstraction
+| I2C can be used for non-MCTP
+| I3C exclusively bound to MCTP
+| **HUBRIS BETTER** - more flexible
+|===
+
+**Shared Critical Limitations:**
+
+Both implementations share these fundamental constraints:
+
+1. **Single Message Buffer** - A single slot that overwrites on overflow. Neither
+   implementation uses a queue, so burst traffic causes silent message loss.
+
+2. **Silent Overflow** - When messages arrive faster than they can be processed,
+   they are silently dropped or overwritten. Neither signals errors to the sender.
+
+3. **Single Subscriber per Type** - Only one consumer can receive messages of a
+   given type at a time. Pub/sub patterns are not supported.
+
+**Where Hubris Improves:**
+
+1. **Transport Flexibility** - Hubris I2C slave mode is a generic transport layer.
+   Applications can use it for MCTP, raw PMBus, or custom protocols. Caliptra's
+   I3C is exclusively bound to MCTP with no abstraction layer for other uses.
+
+2. **Task Isolation** - Hubris task model provides stronger isolation between
+   the driver and applications than Tock's capsule model.
+
+**Common Design Pattern:**
+
+Both follow a similar layered approach:
+```
+Application (SPDM/PLDM) → Transport (MCTP) → Physical (I2C/I3C)
+```
+
+This validates the Hubris architecture choice of multiplexing at the MCTP layer
+rather than the I2C layer. Both projects concluded that protocol demultiplexing
+belongs at the MCTP layer via message type, not at the physical layer.
+
+**Caliptra Transport Details:**
+
+- Physical Layer: I3C Target Device (not controller)
+- MTU: 68 bytes (69 byte buffer - 1 PEC byte)
+- Integrity: SMBus CRC8 PEC (Packet Error Checking)
+- Flow Control: IBI (In-Band Interrupt) or polling modes
 
 == Conclusion
 
 I2C slave mode support in Hubris provides:
 
 ✅ **Low Latency**: µs-scale notification delivery
-✅ **Safe Buffering**: Messages queued without loss (up to buffer limit)
-✅ **Hardware Agnostic**: Uniform API across platforms
+✅ **Memory Efficient**: Single message buffer minimizes RAM usage (~270 bytes)
+✅ **Hardware Agnostic**: Uniform API via `I2cDevice` and `I2cHardware` trait
 ✅ **Power Efficient**: Interrupt-driven, sleep when idle
-✅ **Protocol Neutral**: Support any I2C-based protocol
-✅ **Type Safe**: Rust memory safety guarantees
+✅ **Protocol Neutral**: Support any I2C-based protocol (MCTP, PMBus, etc.)
+✅ **Type Safe**: Rust memory safety guarantees with `SlaveMessage` struct
 
 **Architecture Goals Achieved:**
-1. Application simplicity (high-level API)
-2. Hardware flexibility (trait abstraction)
-3. Performance (interrupt-driven)
-4. Safety (task isolation, buffering)
-5. Maintainability (clear layering)
+1. Application simplicity (high-level `I2cDevice` API)
+2. Hardware flexibility (`I2cHardware` trait abstraction)
+3. Performance (interrupt-driven via `sys_post()`)
+4. Safety (task isolation, typed errors via `ResponseCode`)
+5. Maintainability (clear three-layer design)
+
+**Implementation Status:**
+
+- ✅ AST1060 slave mode driver (`drv/ast1060-i2c/src/slave.rs`)
+- ✅ Client API (`drv/i2c-api/src/lib.rs`)
+- ✅ Server framework (`drv/openprot-i2c-server/src/main.rs`)
+- ✅ Hardware trait (`drv/i2c-types/src/traits.rs`)
+- ✅ Example applications (`app/ast1060-i2c-example/`, `app/ast1060-mctp-i2c-echo/`)
+
+**Key Implementation Files:**
+
+- `drv/i2c-api/src/lib.rs` - Client API with `I2cDevice` methods
+- `drv/i2c-types/src/lib.rs` - Type definitions (`SlaveMessage`, `SlaveConfig`, `ResponseCode`)
+- `drv/i2c-types/src/traits.rs` - `I2cHardware` trait for hardware abstraction
+- `drv/openprot-i2c-server/src/main.rs` - IPC server handling slave operations
+- `drv/ast1060-i2c/src/slave.rs` - AST1060-specific slave mode implementation
 
 **Next Steps:**
-1. Review link:ast1060-i2c-implementation-guide.adoc[Implementation Guide] for hardware-specific details
-2. Review link:i2c-buffer-management.adoc[Buffer Management] for buffering strategies
-3. Review link:i2c-api.adoc[API Specification] for detailed API reference
-4. Implement hardware adapter for your platform
-5. Write integration tests
-6. Deploy and monitor in production
+1. Review link:i2c-buffer-management.adoc[Buffer Management] for buffering strategies
+2. Review link:i2c-api.adoc[API Specification] for detailed API reference
+3. For new platforms: implement `I2cHardware` trait in platform-specific driver
+4. Write integration tests using external I2C master (e.g., Aardvark)
+5. Deploy and monitor in production
 
 This architecture supports current needs while remaining flexible for future protocol requirements and hardware platforms.

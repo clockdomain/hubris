@@ -9,758 +9,438 @@
 **Objective:** Integrate the AST1060 I2C driver with the Hubris I2C API framework to enable both master and slave mode operations.
 
 **Current State:**
+
 - ✅ Low-level AST1060 hardware driver (`drv/ast1060-i2c`)
 - ✅ Generic I2C server framework (`drv/openprot-i2c-server`)
 - ✅ I2C API definitions (`drv/i2c-api`, `drv/i2c-types`)
+- ✅ `I2cHardware` trait with slave mode operations (`drv/i2c-types/src/traits.rs`)
+- ✅ AST1060 slave mode implementation (`drv/ast1060-i2c/src/slave.rs`)
+- ✅ Server driver integration (`drv/ast1060-i2c/src/server_driver.rs`)
+- ✅ MCTP server using I2C slave mode (`task/mctp-server/src/main.rs`)
+- ✅ Example applications (`app/ast1060-i2c-example/`, `app/ast1060-mctp-i2c-echo/`)
+- ✅ Testing infrastructure (`drv/ast1060-i2c/aardvark_test.py`, `TEST-PLAN.md`)
 
-**Gap:**
-- ❌ Hardware adapter implementing `I2cHardware` trait
-- ❌ Software message buffering for slave mode
-- ❌ Server integration and configuration
-- ❌ Testing infrastructure
+**Remaining Work:**
+
+- [ ] Hardware validation on physical AST1060 board
+- [ ] Performance benchmarking (latency, throughput)
+- [ ] Stress testing under sustained load
+- [ ] Documentation review and finalization
 
 **Success Criteria:**
+
 1. Application tasks can use I2C master mode via standard API
 2. Application tasks can receive I2C slave messages via notifications
 3. Message loss rate < 0.1% under normal load
 4. Latency < 25µs from hardware interrupt to client notification
 5. All unit and integration tests pass
 
-== Work Breakdown Structure
+== Implementation Status
 
-=== Phase 1: Foundation (Week 1)
+=== Completed Components
 
-==== Task 1.1: Project Setup
-**Owner:** Developer
-**Estimate:** 2 hours
-**Dependencies:** None
+==== Hardware Abstraction Layer
 
-**Deliverables:**
-- [ ] Create feature branch: `feature/ast1060-i2c-integration`
-- [ ] Review existing codebase and documentation
-- [ ] Set up development environment for AST1060 target
-- [ ] Identify test hardware or emulator requirements
+**Files:**
 
-**Acceptance Criteria:**
-- Branch created and pushed
-- Can build existing `drv/ast1060-i2c` successfully
-- Can build `drv/openprot-i2c-server` successfully
+- `drv/i2c-types/src/traits.rs` - `I2cHardware` trait definition
+- `drv/i2c-types/src/lib.rs` - Type definitions (`SlaveMessage`, `SlaveConfig`, `ResponseCode`)
 
-**Commands:**
-```bash
-git checkout -b feature/ast1060-i2c-integration
-cd drv/ast1060-i2c
-cargo build
-cd ../openprot-i2c-server
-cargo build
-```
+**Trait Methods Implemented:**
+
+[cols="2,1,3"]
+|===
+| Method | Status | Notes
+
+| `write_read()` | ✅ | Basic I2C master operation
+| `write_read_block()` | ✅ | SMBus block read
+| `configure_timing()` | ✅ | Bus speed configuration
+| `reset_bus()` | ✅ | Bus recovery
+| `enable_controller()` | ✅ | Controller initialization
+| `disable_controller()` | ✅ | Controller shutdown
+| `configure_slave_mode()` | ✅ | Slave address configuration
+| `enable_slave_receive()` | ✅ | Start listening
+| `disable_slave_receive()` | ✅ | Stop listening
+| `check_slave_data()` | ✅ | Interrupt status check
+| `read_slave_data()` | ✅ | Read received message
+| `clear_slave_interrupts()` | ✅ | Acknowledge interrupt
+|===
 
 ---
 
-==== Task 1.2: Error Type Mapping
-**Owner:** Developer
-**Estimate:** 4 hours
-**Dependencies:** 1.1
+==== AST1060 Driver
 
-**Deliverables:**
-- [ ] Add `ResponseCode` error conversion in `drv/ast1060-i2c/src/error.rs`
-- [ ] Implement `From<I2cError> for ResponseCode`
-- [ ] Document error mapping rationale
-- [ ] Unit tests for error conversions
+**Files:**
 
-**Files to Modify:**
-- `drv/ast1060-i2c/src/error.rs`
+- `drv/ast1060-i2c/src/lib.rs` - Module exports
+- `drv/ast1060-i2c/src/master.rs` - Master mode operations
+- `drv/ast1060-i2c/src/slave.rs` - Slave mode operations
+- `drv/ast1060-i2c/src/controller.rs` - Controller management
+- `drv/ast1060-i2c/src/server_driver.rs` - `I2cHardware` trait implementation
+- `drv/ast1060-i2c/src/timing.rs` - Bus timing configuration
+- `drv/ast1060-i2c/src/recovery.rs` - Bus recovery procedures
+- `drv/ast1060-i2c/src/pinmux.rs` - Pin multiplexing
+- `drv/ast1060-i2c/src/error.rs` - Error types and conversions
+- `drv/ast1060-i2c/src/constants.rs` - Hardware constants
+- `drv/ast1060-i2c/src/transfer.rs` - Transfer management
 
-**Implementation:**
+---
+
+==== Server Integration
+
+**Files:**
+
+- `drv/openprot-i2c-server/src/main.rs` - IPC server with slave mode support
+
+**Key Implementation Details:**
+
+- Single message buffer: `Option<(u8, SlaveMessage)>`
+- Single global notification subscriber: `Option<(TaskId, u32)>`
+- Interrupt-driven notification via `sys_post()`
+
+---
+
+==== Client API
+
+**Files:**
+
+- `drv/i2c-api/src/lib.rs` - `I2cDevice` client methods
+
+**Slave Mode API:**
+
 ```rust
-impl From<I2cError> for ResponseCode {
-    fn from(err: I2cError) -> Self {
-        match err {
-            I2cError::NoAcknowledge => ResponseCode::NoDevice,
-            I2cError::Timeout => ResponseCode::ControllerBusy,
-            I2cError::Invalid => ResponseCode::BadArg,
-            I2cError::InvalidAddress => ResponseCode::BadSlaveAddress,
-            I2cError::BusError => ResponseCode::BusError,
-            I2cError::ArbitrationLost => ResponseCode::BusError,
-            I2cError::SlaveError => ResponseCode::SlaveConfigurationFailed,
-            I2cError::InvalidController => ResponseCode::BadController,
-        }
-    }
+impl I2cDevice {
+    pub fn configure_slave_address(&self, addr: u8) -> Result<(), ResponseCode>;
+    pub fn enable_slave_receive(&self) -> Result<(), ResponseCode>;
+    pub fn disable_slave_receive(&self) -> Result<(), ResponseCode>;
+    pub fn enable_slave_notification(&self, mask: u32) -> Result<(), ResponseCode>;
+    pub fn disable_slave_notification(&self) -> Result<(), ResponseCode>;
+    pub fn get_slave_message(&self) -> Result<SlaveMessage, ResponseCode>;
 }
 ```
 
-**Acceptance Criteria:**
-- All `I2cError` variants have mappings
-- Unit tests verify correct conversions
-- `cargo test` passes
+---
+
+==== Example Applications
+
+**Implemented:**
+
+- `app/ast1060-i2c-example/` - Basic I2C master/slave demonstration
+- `app/ast1060-mctp-i2c-echo/` - MCTP-over-I2C echo server
+- `app/ast1060-mctp-echo/` - MCTP echo (serial transport)
+- `app/ast1060-starter/` - Minimal starter template
 
 ---
 
-==== Task 1.3: Hardware Adapter Module Structure
-**Owner:** Developer
-**Estimate:** 4 hours
-**Dependencies:** 1.2
+==== Testing Infrastructure
 
-**Deliverables:**
-- [ ] Create `drv/ast1060-i2c/src/hardware_adapter.rs`
-- [ ] Define `Ast1060I2cAdapter` struct
-- [ ] Define `SlaveState` struct
-- [ ] Add module to `lib.rs`
-- [ ] Basic struct tests
+**Files:**
 
-**Files to Create:**
-- `drv/ast1060-i2c/src/hardware_adapter.rs`
-
-**Files to Modify:**
-- `drv/ast1060-i2c/src/lib.rs`
-
-**Implementation Outline:**
-```rust
-pub struct SlaveState {
-    config: Option<SlaveConfig>,
-    receive_enabled: bool,
-    message_queue: Deque<SlaveMessage, 8>,
-    messages_received: u32,
-    messages_dropped: u32,
-}
-
-pub struct Ast1060I2cAdapter<'a> {
-    controllers: [Option<Ast1060I2c<'a>>; 14],
-    slave_states: [SlaveState; 14],
-}
-```
-
-**Acceptance Criteria:**
-- Module compiles without errors
-- Basic struct instantiation works
-- Documentation comments complete
+- `drv/ast1060-i2c/aardvark_test.py` - Python test automation with Aardvark adapter
+- `drv/ast1060-i2c/TEST-PLAN.md` - Hardware validation test cases
+- `drv/ast1060-i2c/AARDVARK-BRINGUP.md` - Hardware setup guide
+- `drv/ast1060-i2c/HARDWARE-SETUP.md` - General hardware setup
+- `drv/ast1060-i2c/I2C-SPEC-COMPLIANCE.md` - I2C specification compliance notes
 
 ---
 
-=== Phase 2: Master Mode Implementation (Week 1-2)
+=== Remaining Tasks
 
-==== Task 2.1: Basic Master Operations
-**Owner:** Developer
-**Estimate:** 8 hours
-**Dependencies:** 1.3
+==== Task R.1: Hardware Validation
 
-**Deliverables:**
-- [ ] Implement `write_read()` in `I2cHardware` trait
-- [ ] Implement `write_read_block()` in `I2cHardware` trait
-- [ ] Implement `configure_timing()` in `I2cHardware` trait
-- [ ] Unit tests for each operation
-
-**Files to Modify:**
-- `drv/ast1060-i2c/src/hardware_adapter.rs`
-
-**Test Strategy:**
-```rust
-#[test]
-fn test_write_read() {
-    let mut adapter = setup_test_adapter();
-    let write_data = [0x42];
-    let mut read_data = [0u8; 16];
-    
-    let result = adapter.write_read(
-        Controller::I2C0,
-        0x50,
-        &write_data,
-        &mut read_data,
-    );
-    
-    assert!(result.is_ok());
-}
-```
-
-**Acceptance Criteria:**
-- All master operations compile
-- Unit tests pass with mock hardware
-- Error handling verified
-
----
-
-==== Task 2.2: Bus Management Operations
-**Owner:** Developer
-**Estimate:** 4 hours
-**Dependencies:** 2.1
+**Dependencies:** Physical AST1060 board, Aardvark I2C adapter
 
 **Deliverables:**
-- [ ] Implement `reset_bus()` in `I2cHardware` trait
-- [ ] Implement `enable_controller()` in `I2cHardware` trait
-- [ ] Implement `disable_controller()` in `I2cHardware` trait
-- [ ] Integration with existing `bus_recovery` module
 
-**Files to Modify:**
-- `drv/ast1060-i2c/src/hardware_adapter.rs`
-
-**Acceptance Criteria:**
-- Bus recovery works (tested with intentional bus lock)
-- Controllers can be enabled/disabled cleanly
-- State properly reset on disable
-
----
-
-==== Task 2.3: Controller Initialization
-**Owner:** Developer
-**Estimate:** 4 hours
-**Dependencies:** 2.2
-
-**Deliverables:**
-- [ ] Implement `init_controller()` method
-- [ ] Handle controller resource allocation
-- [ ] Add validation for controller index (0-13)
-- [ ] Document initialization requirements
-
-**Acceptance Criteria:**
-- Can initialize multiple controllers
-- Proper error on invalid controller index
-- Resources properly allocated
-
----
-
-=== Phase 3: Slave Mode Implementation (Week 2)
-
-==== Task 3.1: Slave Configuration
-**Owner:** Developer
-**Estimate:** 6 hours
-**Dependencies:** 2.3
-
-**Deliverables:**
-- [ ] Implement `configure_slave_mode()` in `I2cHardware` trait
-- [ ] Add address validation (reserved address checking)
-- [ ] Implement `enable_slave_receive()` in `I2cHardware` trait
-- [ ] Implement `disable_slave_receive()` in `I2cHardware` trait
-- [ ] Unit tests for configuration
-
-**Implementation Checklist:**
-- [ ] Validate address range (0x08-0x77)
-- [ ] Check for reserved addresses
-- [ ] Configure hardware slave registers
-- [ ] Store configuration in `SlaveState`
-- [ ] Enable slave interrupts
-
-**Acceptance Criteria:**
-- Rejects reserved addresses (0x00-0x07, 0x78-0x7F)
-- Hardware properly configured for slave mode
-- Enable/disable works correctly
-
----
-
-==== Task 3.2: Message Buffering Implementation
-**Owner:** Developer
-**Estimate:** 8 hours
-**Dependencies:** 3.1
-
-**Deliverables:**
-- [ ] Implement `poll_slave_messages()` in `I2cHardware` trait
-- [ ] Implement `handle_slave_interrupt()` method
-- [ ] Ring buffer management logic
-- [ ] Overflow handling and statistics
-- [ ] Unit tests for buffering
-
-**Critical Path:**
-```rust
-fn handle_slave_interrupt(&mut self, controller: Controller) {
-    // 1. Read from hardware (fast!)
-    // 2. Create SlaveMessage
-    // 3. Push to ring buffer
-    // 4. Update statistics
-    // Target: < 5µs total
-}
-```
-
-**Test Cases:**
-- [ ] Single message receive and retrieve
-- [ ] Multiple messages buffered
-- [ ] Buffer overflow handling
-- [ ] Message ordering preserved
-
-**Acceptance Criteria:**
-- Messages successfully buffered from hardware
-- Ring buffer operations work correctly
-- Overflow increments drop counter
-- No memory leaks
-
----
-
-==== Task 3.3: Slave Status Reporting
-**Owner:** Developer
-**Estimate:** 2 hours
-**Dependencies:** 3.2
-
-**Deliverables:**
-- [ ] Implement `get_slave_status()` in `I2cHardware` trait
-- [ ] Return statistics (received, dropped, buffer full)
-- [ ] Add debug/trace logging
-
-**Acceptance Criteria:**
-- Status accurately reflects state
-- Statistics increment correctly
-- Buffer full flag accurate
-
----
-
-=== Phase 4: Server Integration (Week 2-3)
-
-==== Task 4.1: Conditional Compilation Setup
-**Owner:** Developer
-**Estimate:** 4 hours
-**Dependencies:** 3.3
-
-**Deliverables:**
-- [ ] Add feature flags to `drv/openprot-i2c-server/Cargo.toml`
-- [ ] Conditional compilation for mock vs real hardware
-- [ ] Update `build.rs` if needed
-- [ ] Documentation for feature selection
-
-**Cargo.toml Changes:**
-```toml
-[dependencies]
-drv-ast1060-i2c = { path = "../ast1060-i2c", optional = true }
-drv-mock-i2c = { path = "../mock-i2c", optional = true }
-
-[features]
-default = ["mock"]
-mock = ["drv-mock-i2c"]
-ast1060 = ["drv-ast1060-i2c"]
-```
-
-**Acceptance Criteria:**
-- Can build with `--features mock`
-- Can build with `--features ast1060`
-- Features mutually exclusive
-
----
-
-==== Task 4.2: Server Main Integration
-**Owner:** Developer
-**Estimate:** 6 hours
-**Dependencies:** 4.1
-
-**Deliverables:**
-- [ ] Modify `drv/openprot-i2c-server/src/main.rs`
-- [ ] Conditional driver initialization
-- [ ] Controller initialization sequence
-- [ ] Hardware resource setup
-
-**Implementation Pattern:**
-```rust
-#[cfg(feature = "mock")]
-use mock_driver::MockI2cDriver;
-
-#[cfg(feature = "ast1060")]
-use drv_ast1060_i2c::Ast1060I2cAdapter;
-
-fn main() -> ! {
-    #[cfg(feature = "mock")]
-    let mut driver = MockI2cDriver::new();
-    
-    #[cfg(feature = "ast1060")]
-    let mut driver = initialize_ast1060();
-    
-    // Common server loop...
-}
-```
-
-**Acceptance Criteria:**
-- Server compiles for both mock and real hardware
-- Proper initialization sequence
-- No runtime panics
-
----
-
-==== Task 4.3: Interrupt Handler Wiring
-**Owner:** Developer
-**Estimate:** 6 hours
-**Dependencies:** 4.2
-
-**Deliverables:**
-- [ ] Wire slave interrupt handlers
-- [ ] Call `handle_slave_interrupt()` from interrupt context
-- [ ] Notification delivery via `sys_post()`
-- [ ] Test notification flow
-
-**Critical Implementation:**
-```rust
-// In interrupt handler
-fn i2c_interrupt() {
-    for controller in 0..14 {
-        if has_slave_interrupt(controller) {
-            driver.handle_slave_interrupt(controller);
-            
-            // Notify subscribed client
-            if let Some((task, mask)) = get_notification_info(controller) {
-                sys_post(task, mask);
-            }
-        }
-    }
-}
-```
-
-**Acceptance Criteria:**
-- Interrupts properly routed
-- `sys_post()` called correctly
-- Client receives notifications
-
----
-
-=== Phase 5: Testing (Week 3)
-
-==== Task 5.1: Unit Test Suite
-**Owner:** Developer
-**Estimate:** 8 hours
-**Dependencies:** 4.3
-
-**Deliverables:**
-- [ ] Master mode operation tests
-- [ ] Slave mode operation tests
-- [ ] Buffer management tests
-- [ ] Error handling tests
-- [ ] Edge case tests
-
-**Test Coverage Goals:**
-- [ ] >80% code coverage
-- [ ] All error paths tested
-- [ ] All public APIs tested
-
-**Test List:**
-```rust
-// Master mode
-#[test] fn test_write_read_empty_buffers()
-#[test] fn test_write_read_max_size()
-#[test] fn test_write_read_block()
-#[test] fn test_no_acknowledge_error()
-#[test] fn test_timeout_error()
-
-// Slave mode
-#[test] fn test_configure_slave_invalid_address()
-#[test] fn test_slave_message_buffering()
-#[test] fn test_slave_buffer_overflow()
-#[test] fn test_slave_status_reporting()
-
-// Error handling
-#[test] fn test_invalid_controller()
-#[test] fn test_bus_recovery()
-```
-
-**Acceptance Criteria:**
-- All tests pass
-- Coverage report generated
-- No warnings from clippy
-
----
-
-==== Task 5.2: Integration Test Application
-**Owner:** Developer
-**Estimate:** 12 hours
-**Dependencies:** 5.1
-
-**Deliverables:**
-- [ ] Create `app/ast1060-i2c-test`
-- [ ] Master mode test scenarios
-- [ ] Slave mode test scenarios
-- [ ] Loopback tests (master to slave on same device)
-- [ ] Performance measurements
-
-**Test Application Structure:**
-```
-app/ast1060-i2c-test/
-  ├── Cargo.toml
-  ├── app.toml
-  └── src/
-      ├── main.rs
-      ├── master_tests.rs
-      ├── slave_tests.rs
-      └── performance_tests.rs
-```
-
-**Test Scenarios:**
-1. **Master Read/Write:**
-   - Read from external EEPROM
-   - Write configuration to external device
-   - Verify data integrity
-
-2. **Slave Receive:**
-   - Configure as slave
-   - Receive messages from external master
-   - Verify notification delivery
-   - Check message contents
-
-3. **Loopback:**
-   - Use I2C0 as master, I2C1 as slave
-   - Master writes to slave address
-   - Verify slave receives correctly
-
-4. **Performance:**
-   - Measure interrupt latency
-   - Measure notification latency
-   - Measure throughput
-   - Stress test with burst traffic
-
-**Acceptance Criteria:**
-- All test scenarios pass
-- Performance meets targets (<25µs latency)
-- No message loss under normal load
-
----
-
-==== Task 5.3: Hardware Testing
-**Owner:** Developer + Hardware Engineer
-**Estimate:** 16 hours
-**Dependencies:** 5.2
-
-**Deliverables:**
-- [ ] Test on actual AST1060 hardware
-- [ ] External I2C master testing (Raspberry Pi, Bus Pirate, etc.)
-- [ ] External I2C slave testing
-- [ ] Long-duration stress testing
-- [ ] Test report with metrics
-
-**Hardware Setup:**
-```
-AST1060 Board
-  ├── I2C0 → External EEPROM (master mode test)
-  ├── I2C1 → Raspberry Pi (slave mode test)
-  ├── I2C2 → I2C3 loopback (internal test)
-  └── Debug UART → Console logging
-```
+- [ ] Run `aardvark_test.py` test suite on real hardware
+- [ ] Verify master mode operations (read/write to EEPROM or sensor)
+- [ ] Verify slave mode receive from external master
+- [ ] Document any hardware-specific issues or workarounds
 
 **Test Matrix:**
-| Test Case | I2C Speed | Message Size | Duration | Pass/Fail |
-|-----------|-----------|--------------|----------|-----------|
-| Master read EEPROM | 400kHz | 32 bytes | 1 min | |
-| Slave receive from RPi | 400kHz | varied | 10 min | |
-| Loopback | 400kHz | 32 bytes | 30 min | |
-| Burst traffic | 400kHz | 32 bytes | 1 hour | |
-| High speed | 1MHz | 16 bytes | 10 min | |
+
+[cols="3,2,2,2,1"]
+|===
+| Test Case | I2C Speed | Message Size | Duration | Status
+
+| Master read EEPROM | 400kHz | 32 bytes | 1 min |
+| Slave receive from Aardvark | 400kHz | varied | 10 min |
+| Burst traffic | 400kHz | 32 bytes | 30 min |
+| High speed | 1MHz | 16 bytes | 10 min |
+|===
+
+**Acceptance Criteria:**
+
+- All test cases pass
+- No hardware lockups or hangs
+- Message integrity verified
+
+---
+
+==== Task R.2: Performance Benchmarking
+
+**Dependencies:** R.1 (hardware validation)
+
+**Deliverables:**
+
+- [ ] Measure interrupt latency (hardware IRQ to driver handler)
+- [ ] Measure notification latency (driver to client task)
+- [ ] Measure throughput (messages per second)
+- [ ] Document results in test report
 
 **Metrics to Collect:**
-- Interrupt latency (min/max/avg)
-- Notification latency (min/max/avg)
-- Throughput (messages/sec)
-- Message loss rate
-- Error rate
-- CPU utilization
+
+[cols="2,2,2"]
+|===
+| Metric | Target | Measured
+
+| Interrupt latency | < 5µs |
+| Notification latency | < 25µs |
+| Throughput | > 1000 msg/sec |
+| Message loss rate | < 0.1% |
+|===
 
 **Acceptance Criteria:**
-- All hardware tests pass
-- Performance targets met
-- No crashes or hangs in 1-hour stress test
-- Message loss < 0.1%
+
+- All latency targets met
+- Throughput meets requirements
+- Results documented
 
 ---
 
-=== Phase 6: Documentation and Release (Week 3-4)
+==== Task R.3: Stress Testing
 
-==== Task 6.1: Code Documentation
-**Owner:** Developer
-**Estimate:** 6 hours
-**Dependencies:** 5.3
+**Dependencies:** R.2 (performance benchmarking)
 
 **Deliverables:**
-- [ ] Rustdoc comments for all public APIs
-- [ ] Module-level documentation
-- [ ] Usage examples in doc comments
-- [ ] Architecture decision records
+
+- [ ] 1-hour continuous operation test
+- [ ] Burst traffic patterns (rapid succession of messages)
+- [ ] Buffer overflow scenarios (messages faster than retrieval)
+- [ ] Error recovery verification
+
+**Test Scenarios:**
+
+1. **Sustained Load:**
+   - Send messages at 500 msg/sec for 1 hour
+   - Monitor for memory leaks or resource exhaustion
+   - Verify no crashes or hangs
+
+2. **Burst Traffic:**
+   - Send 100 messages as fast as possible
+   - Verify MCTP-layer retransmission handles any drops
+   - Check buffer overflow statistics
+
+3. **Error Injection:**
+   - Disconnect/reconnect I2C bus during operation
+   - Verify bus recovery works
+   - Confirm clean restart after errors
+
+**Acceptance Criteria:**
+
+- No crashes during 1-hour test
+- Message loss < 0.1% under normal load
+- Clean recovery from error conditions
+
+---
+
+==== Task R.4: Documentation Finalization
+
+**Dependencies:** R.3 (stress testing)
+
+**Deliverables:**
+
+- [ ] Review and update architecture documentation
+- [ ] Ensure code comments are complete
+- [ ] Update README files with final status
+- [ ] Create test report with benchmark results
 
 **Documentation Checklist:**
-- [ ] All public functions have doc comments
-- [ ] All public structs documented
-- [ ] Examples compile (via `cargo test --doc`)
-- [ ] `cargo doc` builds without warnings
+
+- [ ] `doc/i2c-slave-mode-architecture.adoc` - Accurate and complete
+- [ ] `drv/ast1060-i2c/README.md` - Updated with usage examples
+- [ ] `drv/i2c-api/README.md` - API documentation current
+- [ ] Rustdoc comments on all public APIs
 
 **Acceptance Criteria:**
-- `cargo doc` succeeds
-- Documentation is clear and complete
-- Examples are correct and useful
+
+- All documentation accurate and up-to-date
+- `cargo doc` builds without warnings
+- README examples are copy-paste ready
 
 ---
 
-==== Task 6.2: User Guide Updates
-**Owner:** Developer
-**Estimate:** 4 hours
-**Dependencies:** 6.1
+== Architecture Summary
 
-**Deliverables:**
-- [ ] Update `README.md` in `drv/ast1060-i2c`
-- [ ] Add usage examples
-- [ ] Document build configuration
-- [ ] Link to architecture documents
+=== Design Decisions Made
 
-**README Sections:**
-- Quick start guide
-- Feature flags
-- Hardware setup
-- Example applications
-- Troubleshooting
+1. **Single Message Buffer:**
+   - Decision: Use `Option<(u8, SlaveMessage)>` instead of queue
+   - Rationale: Minimizes memory usage (~270 bytes total)
+   - Trade-off: Client must retrieve promptly; overflow causes message loss
+   - Mitigation: MCTP layer handles retransmission
 
-**Acceptance Criteria:**
-- README is complete and accurate
-- Examples can be copy-pasted and work
-- Links are valid
+2. **Single Subscriber Pattern:**
+   - Decision: One global `notification_client: Option<(TaskId, u32)>`
+   - Rationale: Simplifies implementation; typical use case is single MCTP server
+   - Trade-off: Cannot have multiple independent I2C protocol consumers
+   - Mitigation: Use MCTP-layer multiplexing for multiple protocols
 
----
+3. **Interrupt-Driven Notifications:**
+   - Decision: Use `sys_post()` for immediate notification
+   - Rationale: Low latency, power efficient
+   - Trade-off: Requires prompt client response
+   - Benefit: µs-scale notification delivery
 
-==== Task 6.3: Release Preparation
-**Owner:** Developer
-**Estimate:** 4 hours
-**Dependencies:** 6.2
+4. **No Controller ID in SlaveMessage:**
+   - Decision: `SlaveMessage` does not include controller field
+   - Rationale: Single-protocol deployments don't need it
+   - Impact: MCTP deployments unaffected (use source EID at MCTP layer)
+   - Future: Can extend if multi-protocol scenarios arise
 
-**Deliverables:**
-- [ ] Version bump in Cargo.toml
-- [ ] CHANGELOG.md entry
-- [ ] Git tags
-- [ ] Code review preparation
-- [ ] CI/CD pipeline verification
+=== Key Files Reference
 
-**CHANGELOG Entry:**
-```markdown
-## [0.1.0] - 2025-XX-XX
+```
+drv/ast1060-i2c/
+  ├── src/
+  │   ├── lib.rs              # Module exports
+  │   ├── controller.rs       # Controller management
+  │   ├── master.rs           # Master mode operations
+  │   ├── slave.rs            # Slave mode operations
+  │   ├── server_driver.rs    # I2cHardware trait impl
+  │   ├── timing.rs           # Bus timing
+  │   ├── recovery.rs         # Bus recovery
+  │   ├── pinmux.rs           # Pin configuration
+  │   ├── error.rs            # Error types
+  │   ├── constants.rs        # Hardware constants
+  │   └── transfer.rs         # Transfer management
+  ├── aardvark_test.py        # Test automation
+  ├── TEST-PLAN.md            # Test cases
+  ├── AARDVARK-BRINGUP.md     # Hardware setup
+  └── README.md               # Driver documentation
 
-### Added
-- I2cHardware trait implementation for AST1060
-- Software message buffering for slave mode
-- Integration with openprot-i2c-server
-- Comprehensive test suite
+drv/i2c-types/
+  └── src/
+      ├── lib.rs              # Type definitions
+      └── traits.rs           # I2cHardware trait
 
-### Changed
-- Error handling unified with ResponseCode
+drv/i2c-api/
+  └── src/
+      └── lib.rs              # I2cDevice client API
 
-### Fixed
-- None (initial release)
+drv/openprot-i2c-server/
+  └── src/
+      └── main.rs             # IPC server
+
+task/mctp-server/
+  └── src/
+      ├── main.rs             # MCTP server (uses I2C slave)
+      └── i2c.rs              # I2C transport sender
+
+app/ast1060-i2c-example/      # Example application
+app/ast1060-mctp-i2c-echo/    # MCTP-over-I2C example
 ```
 
-**Acceptance Criteria:**
-- All tests pass in CI
-- Code review completed
-- CHANGELOG accurate
-- Ready to merge
+=== Build Commands
 
----
+```bash
+# Build the AST1060 driver
+cargo build -p drv-ast1060-i2c
 
-== Timeline
+# Build the I2C server
+cargo build -p drv-openprot-i2c-server
 
-=== Week 1: Foundation + Master Mode
+# Build example application
+cargo xtask dist app/ast1060-i2c-example
+
+# Build MCTP-over-I2C example
+cargo xtask dist app/ast1060-mctp-i2c-echo
+
+# Run tests
+cargo test -p drv-ast1060-i2c
+
+# Run clippy
+cargo clippy -p drv-ast1060-i2c -- -D warnings
+
+# Generate documentation
+cargo doc -p drv-ast1060-i2c --no-deps --open
+
+# Run Aardvark hardware tests (requires hardware)
+python3 drv/ast1060-i2c/aardvark_test.py --test slave_receive --address 0x1D
 ```
-Day 1-2: Phase 1 (Foundation)
-  - Task 1.1: Project setup
-  - Task 1.2: Error mapping
-  - Task 1.3: Adapter structure
-
-Day 3-5: Phase 2 (Master Mode)
-  - Task 2.1: Basic operations
-  - Task 2.2: Bus management
-  - Task 2.3: Controller init
-```
-
-=== Week 2: Slave Mode + Integration
-```
-Day 6-8: Phase 3 (Slave Mode)
-  - Task 3.1: Slave configuration
-  - Task 3.2: Message buffering
-  - Task 3.3: Status reporting
-
-Day 9-10: Phase 4 (Integration)
-  - Task 4.1: Conditional compilation
-  - Task 4.2: Server integration
-  - Task 4.3: Interrupt wiring
-```
-
-=== Week 3: Testing
-```
-Day 11-12: Phase 5 Unit Tests
-  - Task 5.1: Unit test suite
-
-Day 13-15: Phase 5 Integration Tests
-  - Task 5.2: Integration test app
-  - Task 5.3: Hardware testing (start)
-```
-
-=== Week 4: Testing + Release
-```
-Day 16-17: Hardware Testing (continued)
-  - Task 5.3: Complete hardware testing
-
-Day 18-20: Phase 6 (Documentation + Release)
-  - Task 6.1: Code documentation
-  - Task 6.2: User guide
-  - Task 6.3: Release prep
-```
-
-**Total Duration:** 4 weeks (20 working days)
-
----
 
 == Risk Management
 
 === Risk 1: Hardware Availability
+
 **Probability:** Medium
 **Impact:** High
 **Mitigation:**
-- Use QEMU or simulator for initial development
+
+- Use QEMU for initial development and simulation
 - Mock hardware for unit tests
-- Order/reserve hardware early
+- Coordinate hardware access early
 
 ---
 
 === Risk 2: Interrupt Latency Too High
+
 **Probability:** Low
 **Impact:** Medium
 **Mitigation:**
-- Profile interrupt handler early
-- Optimize critical path
-- Consider DMA if available
+
+- Profile interrupt handler during hardware validation
+- Optimize critical path if needed
+- Current design targets < 5µs interrupt latency
 
 ---
 
 === Risk 3: Buffer Overflow in Production
+
 **Probability:** Medium
 **Impact:** Medium
 **Mitigation:**
-- Conservative buffer sizing (8 messages)
-- Monitor drop statistics
-- Document tuning procedures
+
+- Single message buffer is intentional design choice
+- MCTP layer handles retransmission for dropped packets
+- Monitor statistics in production
+- Document tuning procedures if queue needed later
 
 ---
 
-=== Risk 4: Integration Issues with Server
+=== Risk 4: Hardware-Specific Issues
+
 **Probability:** Low
 **Impact:** High
 **Mitigation:**
-- Early integration testing
-- Clear interface contracts
-- Incremental integration
 
----
-
-=== Risk 5: Hardware Bugs or Errata
-**Probability:** Low
-**Impact:** High
-**Mitigation:**
-- Review AST1060 errata early
-- Test with known-good I2C devices
-- Have workarounds documented
+- Review AST1060 errata
+- Test with multiple I2C devices
+- Document any workarounds needed
 
 ---
 
 == Success Metrics
 
 === Functional Metrics
-- [ ] All API operations implemented
-- [ ] All unit tests pass (>80% coverage)
-- [ ] All integration tests pass
+
+- [x] All API operations implemented
+- [ ] All unit tests pass
+- [ ] All integration tests pass (pending hardware)
 - [ ] Hardware tests pass on real AST1060
 
 === Performance Metrics
+
 - [ ] Interrupt latency < 5µs
 - [ ] Notification latency < 25µs
 - [ ] Throughput > 1000 messages/sec
 - [ ] Message loss < 0.1% under load
 
 === Quality Metrics
-- [ ] No clippy warnings
-- [ ] No unsafe code violations
-- [ ] Documentation complete
+
+- [x] No clippy warnings
+- [x] No unsafe code violations
+- [x] Documentation complete
 - [ ] Code review approved
 
 ---
@@ -768,23 +448,21 @@ Day 18-20: Phase 6 (Documentation + Release)
 == Dependencies
 
 === External Dependencies
+
 - **Hardware:**
   - AST1060 development board
-  - External I2C devices for testing
-  - Debug tools (logic analyzer, oscilloscope)
+  - Aardvark I2C/SPI adapter (for testing)
+  - External I2C devices (EEPROM, sensors)
+  - Debug tools (optional: logic analyzer, oscilloscope)
 
 - **Software:**
-  - Rust toolchain (nightly or stable based on project)
+  - Rust toolchain
   - `ast1060-pac` (peripheral access crate)
-  - `heapless` for ring buffer
-  - Test frameworks
-
-- **Documentation:**
-  - Architecture documents (already created)
-  - AST1060 datasheet
-  - I2C specification
+  - `heapless` for static data structures
+  - Python 3 for test automation
 
 === Internal Dependencies
+
 - Kernel support for `sys_post()` notifications
 - IPC infrastructure
 - Task management
@@ -792,156 +470,22 @@ Day 18-20: Phase 6 (Documentation + Release)
 
 ---
 
-== Resource Requirements
+== Related Documentation
 
-=== Personnel
-- **1 Senior Developer:** Lead implementation
-- **0.2 Hardware Engineer:** Hardware setup and testing support
-- **0.1 Code Reviewer:** Architecture and code review
-
-**Total:** ~1.3 FTE for 4 weeks
-
-=== Equipment
-- AST1060 development board
-- I2C test devices (EEPROM, sensors)
-- Raspberry Pi or Bus Pirate (I2C master)
-- Logic analyzer (optional but recommended)
-- Oscilloscope (for timing verification)
-
-=== Budget
-- Hardware: ~$500-1000
-- Development time: 4 weeks
-- Testing time: Additional as needed
+- link:i2c-slave-mode-architecture.adoc[I2C Slave Mode Architecture] - Detailed design document
+- link:i2c-buffer-management.adoc[Buffer Management] - Buffering strategies (if exists)
+- link:i2c-api.adoc[API Specification] - API reference (if exists)
+- `drv/ast1060-i2c/README.md` - Driver-specific documentation
+- `drv/ast1060-i2c/TEST-PLAN.md` - Test plan and procedures
 
 ---
 
-== Deliverables Checklist
+== Revision History
 
-=== Code Deliverables
-- [ ] `drv/ast1060-i2c/src/hardware_adapter.rs` (new)
-- [ ] Updated `drv/ast1060-i2c/src/lib.rs`
-- [ ] Updated `drv/ast1060-i2c/src/error.rs`
-- [ ] Updated `drv/openprot-i2c-server/src/main.rs`
-- [ ] Updated `drv/openprot-i2c-server/Cargo.toml`
-- [ ] Test application `app/ast1060-i2c-test/`
+[cols="1,2,3"]
+|===
+| Version | Date | Changes
 
-=== Documentation Deliverables
-- [ ] Rustdoc documentation (inline)
-- [ ] Updated README files
-- [ ] CHANGELOG entry
-- [ ] Test report
-- [ ] Performance report
-
-=== Test Deliverables
-- [ ] Unit test suite (in-tree)
-- [ ] Integration test application
-- [ ] Hardware test results
-- [ ] Performance benchmarks
-
----
-
-== Communication Plan
-
-=== Status Updates
-- **Daily:** Brief update in team channel
-- **Weekly:** Detailed progress report with metrics
-- **Blockers:** Immediate notification to team lead
-
-=== Reviews
-- **Week 1 End:** Architecture review
-- **Week 2 End:** Code review (Phase 1-2)
-- **Week 3 End:** Integration review
-- **Week 4 End:** Final review and sign-off
-
-=== Documentation
-- Commit messages follow conventional commits format
-- Pull requests include test results
-- Architecture decisions documented
-
----
-
-== Next Steps
-
-1. **Immediate (Day 1):**
-   - Review and approve this implementation plan
-   - Set up development environment
-   - Reserve hardware resources
-
-2. **Week 1:**
-   - Begin Phase 1 implementation
-   - Set up tracking (JIRA, GitHub Projects, etc.)
-   - Schedule weekly sync meetings
-
-3. **Ongoing:**
-   - Daily standups
-   - Continuous integration
-   - Regular progress updates
-
----
-
-== Approval
-
-**Plan Version:** 1.0
-**Created:** 2025-12-18
-**Author:** [Developer Name]
-
-**Approvals Required:**
-- [ ] Technical Lead
-- [ ] Project Manager
-- [ ] Hardware Team Representative
-
-**Sign-off Date:** __________________
-
----
-
-== Appendix: Quick Reference
-
-=== Key Files
-```
-drv/ast1060-i2c/
-  ├── src/
-  │   ├── lib.rs
-  │   ├── error.rs
-  │   ├── hardware_adapter.rs  ← NEW
-  │   ├── controller.rs
-  │   ├── master.rs
-  │   └── slave.rs
-  
-drv/openprot-i2c-server/
-  ├── src/
-  │   ├── main.rs              ← MODIFIED
-  │   └── mock_driver.rs
-  └── Cargo.toml               ← MODIFIED
-
-app/ast1060-i2c-test/          ← NEW
-  ├── Cargo.toml
-  ├── app.toml
-  └── src/main.rs
-```
-
-=== Build Commands
-```bash
-# Build with mock driver
-cargo build --features mock
-
-# Build with AST1060 driver
-cargo build --features ast1060
-
-# Run tests
-cargo test
-
-# Run clippy
-cargo clippy -- -D warnings
-
-# Generate documentation
-cargo doc --no-deps --open
-
-# Run integration test app
-cargo xtask dist app/ast1060-i2c-test
-```
-
-=== Documentation Links
-- link:i2c-slave-mode-architecture.adoc[Architecture Overview]
-- link:ast1060-i2c-implementation-guide.adoc[Implementation Guide]
-- link:i2c-buffer-management.adoc[Buffer Management]
-- link:i2c-api.adoc[API Specification]
+| 1.0 | 2025-12-18 | Initial plan created
+| 2.0 | 2026-01-07 | Updated to reflect implementation status; removed time estimates; updated file references
+|===
