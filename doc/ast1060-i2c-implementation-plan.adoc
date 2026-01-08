@@ -250,14 +250,18 @@ impl I2cDevice {
 
 **Deliverables:**
 
-- [ ] Review and update architecture documentation
+- [x] Review and update architecture documentation
 - [ ] Ensure code comments are complete
 - [ ] Update README files with final status
 - [ ] Create test report with benchmark results
 
 **Documentation Checklist:**
 
-- [ ] `doc/i2c-slave-mode-architecture.adoc` - Accurate and complete
+- [x] `doc/i2c-openprot-architecture.adoc` - Generic framework documentation
+- [x] `doc/i2c-slave-mode-architecture.adoc` - Slave mode design and limitations
+- [x] `doc/mctp-i2c-integration.adoc` - MCTP integration and deployment topologies
+- [x] `doc/i2c-buffer-management.adoc` - Buffer management strategies
+- [x] `doc/ast1060-i2c-implementation-guide.adoc` - Implementation patterns
 - [ ] `drv/ast1060-i2c/README.md` - Updated with usage examples
 - [ ] `drv/i2c-api/README.md` - API documentation current
 - [ ] Rustdoc comments on all public APIs
@@ -472,9 +476,11 @@ python3 drv/ast1060-i2c/aardvark_test.py --test slave_receive --address 0x1D
 
 == Related Documentation
 
-- link:i2c-slave-mode-architecture.adoc[I2C Slave Mode Architecture] - Detailed design document
-- link:i2c-buffer-management.adoc[Buffer Management] - Buffering strategies (if exists)
-- link:i2c-api.adoc[API Specification] - API reference (if exists)
+- link:i2c-openprot-architecture.adoc[Openprot I2C Architecture] - Generic I2C driver framework
+- link:i2c-slave-mode-architecture.adoc[I2C Slave Mode Architecture] - Detailed slave mode design and limitations
+- link:mctp-i2c-integration.adoc[MCTP-over-I2C Integration] - MCTP protocol integration and deployment topologies
+- link:i2c-buffer-management.adoc[Buffer Management] - Buffering strategies and memory considerations
+- link:ast1060-i2c-implementation-guide.adoc[AST1060 Implementation Guide] - Platform-specific implementation patterns
 - `drv/ast1060-i2c/README.md` - Driver-specific documentation
 - `drv/ast1060-i2c/TEST-PLAN.md` - Test plan and procedures
 
@@ -488,4 +494,5 @@ python3 drv/ast1060-i2c/aardvark_test.py --test slave_receive --address 0x1D
 
 | 1.0 | 2025-12-18 | Initial plan created
 | 2.0 | 2026-01-07 | Updated to reflect implementation status; removed time estimates; updated file references
+| 2.1 | 2026-01-08 | Updated documentation references to new doc suite (openprot, mctp-integration, buffer-management)
 |===
